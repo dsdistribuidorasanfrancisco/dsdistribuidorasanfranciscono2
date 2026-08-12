@@ -1507,7 +1507,7 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
   <div class="modal">
     <h3>Confirmar Pedido</h3>
     <div class="form-group"><label>Nombre Completo *</label><input type="text" id="buyerName" placeholder="Tu nombre completo"></div>
-    <div class="form-group"><label>Contacto (teléfono o email) *</label><input type="text" id="buyerContact" placeholder="5555-1234"></div>
+    <div class="form-group"><label>WhatsApp o Gmail *</label><input type="text" id="buyerContact" placeholder="Ej: 5555-1234 o tunombre@gmail.com"></div>
     <div class="form-group">
       <label>Departamento *</label>
       <select id="buyerDept" onchange="loadMunicipios()"><option value="">Selecciona</option></select>
@@ -2451,6 +2451,13 @@ function onBuyerAldeaChange(){
   const aldeaBox=document.getElementById("buyerAldeaNewBox"); if(aldeaBox) aldeaBox.style.display = val==="__new__" ? "flex" : "none";
   updateCheckoutTotal();
 }
+function isValidWaOrGmail(v){
+  const s=(v||"").trim();
+  if(!s) return false;
+  if(s.includes("@")) return /^[a-zA-Z0-9._%+-]+@gmail\.com$/i.test(s);
+  const digits=s.replace(/[^0-9]/g,"");
+  return digits.length>=8;
+}
 function placeOrder(){
   const name=document.getElementById("buyerName").value.trim();
   const contact=document.getElementById("buyerContact").value.trim();
@@ -2459,6 +2466,7 @@ function placeOrder(){
   const address=document.getElementById("buyerAddress").value.trim();
   const notes=document.getElementById("buyerNotes").value.trim();
   if(!name||!contact||!dept||!mun){toast("Completa todos los campos requeridos (*)","error");return;}
+  if(!isValidWaOrGmail(contact)){toast("Ingresa un número de WhatsApp válido o un correo de Gmail (@gmail.com)","error");return;}
   if(dept==="__new__"||mun==="__new__"){toast("Presiona 'Agregar' para confirmar tu departamento/municipio nuevo","error");return;}
   if(document.getElementById("buyerAldea")?.value==="__new__"){toast("Presiona 'Agregar' para confirmar tu lugar nuevo","error");return;}
   const selectedPayment=getSelectedPaymentMethod();
@@ -2483,7 +2491,7 @@ function placeOrder(){
   orders.push(order);
   localStorage.setItem("lx_orders",JSON.stringify(orders));
   if(window._fb && window._fb.ready()) window._fb.saveOrder(order);
-  const wa=storeSettings.waNumber;
+  const wa=(storeSettings.waNumber||"").replace(/[^0-9]/g,"");
   if(wa){
     const tipoLabel=PRECIO_TIPOS[mayoreoTipo||"publico"]?.label||"Público";
     let msg="Nuevo Pedido #"+order.id+"\n"+name+" | "+contact+"\n"+dept+", "+mun+(address?" - "+address:"")+"\n";
@@ -3080,7 +3088,10 @@ function openQuote(){
 }
 function printQuote(){window.print();}
 function shareQuoteWhatsApp(){
-  const wa=storeSettings.waNumber, name=storeSettings.name||"DS DISTRIBUIDORA SAN FRANCISCO NO.2";
+  const waRaw=storeSettings.waNumber||"";
+  const wa=waRaw.replace(/[^0-9]/g,"");
+  if(!wa){toast("Configura el número de WhatsApp del negocio en Ajustes antes de compartir","error");return;}
+  const name=storeSettings.name||"DS DISTRIBUIDORA SAN FRANCISCO NO.2";
   const esMayoreo=mayoreoMode&&mayoreoTipo&&mayoreoTipo!=="publico";
   const labelActivo=esMayoreo?(MAYOREO_SUB_TIPOS[mayoreoTipo]?.label||mayoreoTipo):"Público";
   const client=document.getElementById("quoteClient").value;
@@ -3090,7 +3101,7 @@ function shareQuoteWhatsApp(){
   cart.forEach(ci=>{const p=products.find(x=>x.id===ci.id);if(!p)return;const pu=getPrecioCarritoItem(p,ci.qty).precio;msg+="- "+p.name+" x"+ci.qty+" = Q"+(pu*ci.qty).toFixed(2)+"\n";});
   const total=cart.reduce((s,ci)=>{const p=products.find(x=>x.id===ci.id);return s+(p?getPrecioCarritoItem(p,ci.qty).precio*ci.qty:0);},0);
   msg+="\nTOTAL: Q"+total.toFixed(2);
-  window.open("https://wa.me/"+(wa||"")+"?text="+encodeURIComponent(msg),"_blank");
+  window.open("https://wa.me/"+wa+"?text="+encodeURIComponent(msg),"_blank");
 }
 
 
