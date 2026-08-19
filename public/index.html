@@ -1440,7 +1440,7 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
     <div class="form-group"><label>Descripción</label><textarea id="fDesc" placeholder="Descripción del producto..."></textarea></div>
     <div class="form-group"><label>Precio Público Q *</label><input type="number" id="fPrice" placeholder="0.00" min="0" step="0.01" oninput="previewPrecios()"></div>
     <div class="form-group">
-      <label>💰 Costo de Compra Q <span style="font-size:0.8rem;color:var(--text-muted);font-weight:500">(opcional — precio al que compras el producto)</span></label>
+      <label>💰 Costo Q <span style="font-size:0.8rem;color:var(--text-muted);font-weight:500">(opcional — precio al que compras el producto)</span></label>
       <input type="number" id="fCost" placeholder="0.00" min="0" step="0.01" oninput="previewPrecios()">
       <div id="costPreview" style="font-size:0.82rem;color:var(--green);font-weight:700;margin-top:0.3rem"></div>
     </div>
@@ -3136,12 +3136,13 @@ function exportInventoryCSV(){
   var q=(document.getElementById("adminSearch")?.value||"").toLowerCase().trim();
   var lista=q?products.filter(function(p){return p.name.toLowerCase().includes(q)||(p.sku||"").toLowerCase().includes(q);}):products;
   if(!lista.length){toast("No hay productos que coincidan con la búsqueda","error");return;}
-  var headers=["sku","nombre","precio","precio_oferta","precio_media_docena","precio_docena","precio_fardo","unidades_fardo","precio_mayor","unidades_mayor","stock","descripcion","imgUrl","Categoría"];
+  var headers=["sku","nombre","precio","costo","precio_oferta","precio_media_docena","precio_docena","precio_fardo","unidades_fardo","precio_mayor","unidades_mayor","stock","descripcion","imgUrl","Categoría"];
   var rows=lista.map(function(p){
     return [
       fCSV(p.sku||""),
       fCSV(p.name||""),
       p.price||0,
+      (p.cost||0)>0?p.cost:0,
       (p.precio_oferta||0)>0?p.precio_oferta:0,
       (p.precio_media_docena||0)>0?p.precio_media_docena:0,
       (p.precio_docena||0)>0?p.precio_docena:0,
@@ -3189,6 +3190,7 @@ function importInventoryCSV(e){
         sku:gi(["sku","clave"]),
         name:gi(["nombre","name"]),
         price:gi(["precio","price"]),
+        cost:gi(["costo","cost"]),
         precio_oferta:gi(["precio_oferta","oferta"]),
         precio_media_docena:gi(["precio_media_docena","media_docena"]),
         precio_docena:gi(["precio_docena","docena","doc"]),
@@ -3208,6 +3210,7 @@ function importInventoryCSV(e){
         if(!cols.length||!cols[idx.name])continue;
         var name=cols[idx.name].trim();
         var price=parseFloat(cols[idx.price])||0;
+        var cost=idx.cost>=0?parseFloat(cols[idx.cost])||0:0;
         var stock=idx.stock>=0?parseInt(cols[idx.stock])||0:0;
         var sku=idx.sku>=0?cols[idx.sku]||"":"";
         var desc=idx.desc>=0?cols[idx.desc]||"":"";
@@ -3225,8 +3228,8 @@ function importInventoryCSV(e){
         var ex=sku
           ? products.find(function(p){return p.sku&&p.sku.trim()===sku.trim();})||products.find(function(p){return p.name.toLowerCase().trim()===name.toLowerCase().trim();})
           : products.find(function(p){return p.name.toLowerCase().trim()===name.toLowerCase().trim();});
-        if(ex){Object.assign(ex,{sku:sku,name:name,price:price,stock:stock,desc:desc,imgUrl:imgUrl||ex.imgUrl||"",categoria:categoria,precio_oferta:precio_oferta,precio_media_docena:precio_media_docena,precio_docena:precio_docena,precio_fardo:precio_fardo,unidades_fardo:unidades_fardo,precio_mayor:precio_mayor,unidades_mayor:unidades_mayor,precio_mayoristas:precio_mayoristas});updated++;}
-        else{products.push({id:nextId(),sku:sku,name:name,price:price,stock:stock,desc:desc,img:"",imgUrl:imgUrl,categoria:categoria,precio_oferta:precio_oferta,precio_media_docena:precio_media_docena,precio_docena:precio_docena,precio_fardo:precio_fardo,unidades_fardo:unidades_fardo,precio_mayor:precio_mayor,unidades_mayor:unidades_mayor,precio_mayoristas:precio_mayoristas});added++;}
+        if(ex){Object.assign(ex,{sku:sku,name:name,price:price,cost:cost,stock:stock,desc:desc,imgUrl:imgUrl||ex.imgUrl||"",categoria:categoria,precio_oferta:precio_oferta,precio_media_docena:precio_media_docena,precio_docena:precio_docena,precio_fardo:precio_fardo,unidades_fardo:unidades_fardo,precio_mayor:precio_mayor,unidades_mayor:unidades_mayor,precio_mayoristas:precio_mayoristas});updated++;}
+        else{products.push({id:nextId(),sku:sku,name:name,price:price,cost:cost,stock:stock,desc:desc,img:"",imgUrl:imgUrl,categoria:categoria,precio_oferta:precio_oferta,precio_media_docena:precio_media_docena,precio_docena:precio_docena,precio_fardo:precio_fardo,unidades_fardo:unidades_fardo,precio_mayor:precio_mayor,unidades_mayor:unidades_mayor,precio_mayoristas:precio_mayoristas});added++;}
       }
       sortProductsAZ(); saveProducts();renderAdminProducts();populateInventorySelect();renderShop();
       toast("Importado: "+added+" nuevos, "+updated+" actualizados","success");
