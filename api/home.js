@@ -1,6 +1,6 @@
 // api/home.js — Tienda No.2 (templante2). Sirve la portada con meta tags
 // Open Graph actualizados automáticamente desde Firebase (nombre, descripción y logo).
-// Lee el HTML base desde templante2.html (en la raíz del proyecto).
+// Lee el HTML base desde template.html (en la raíz del proyecto).
 
 const fs = require("fs");
 const path = require("path");
@@ -17,8 +17,8 @@ const FIREBASE_URL =
 let templateCache = null;
 function loadTemplate() {
   if (templateCache) return templateCache;
-  // Ajusta el nombre del archivo si en tu repo lo llamas distinto (ej. "template.html").
-  templateCache = fs.readFileSync(path.join(process.cwd(), "templante2.html"), "utf8");
+  // Nombre del archivo HTML: debe coincidir EXACTO con el del repo y con vercel.json.
+  templateCache = fs.readFileSync(path.join(process.cwd(), "template.html"), "utf8");
   return templateCache;
 }
 
