@@ -13,7 +13,7 @@ module.exports = async (req, res) => {
   }
 
   // ── Buscar producto en Firebase ─────────────────────────────────
-  const FIREBASE_URL = "https://dsdistribuidorasfc2-cc78f-default-rtdb.firebaseio.com/products.json";
+  const FIREBASE_URL = "https://dsdistribuidorasanfrancisco2-default-rtdb.firebaseio.com/products.json";
 
   let ogTitle = STORE_NAME;
   let ogDesc = STORE_NAME;
