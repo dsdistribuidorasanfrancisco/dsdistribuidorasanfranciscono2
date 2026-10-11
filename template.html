@@ -822,6 +822,8 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 .social-login-btn svg { width: 22px; height: 22px; flex-shrink: 0; }
 .social-login-btn.google-btn:hover { border-color: #4285F4; }
 .social-login-btn.facebook-btn:hover { border-color: #1877F2; }
+/* FACEBOOK OCULTO hasta que Meta apruebe la verificación. Para mostrarlo de nuevo, borra la línea de abajo. */
+.social-login-btn.facebook-btn { display: none !important; }
 .client-divider { display: flex; align-items: center; gap: 1rem; margin: 1.2rem 0; color: var(--text-muted); font-size: 0.85rem; font-weight: 600; }
 .client-divider::before, .client-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .client-tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
