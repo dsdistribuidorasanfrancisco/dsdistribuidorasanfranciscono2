@@ -860,10 +860,10 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 @media(max-width:600px){ .client-profile-bar { flex-direction: column; text-align: center; } }
 </style>
   <!-- Favicon (logo pequeño en la pestaña) -->
-  <link rel="icon" type="image/png" href="/icon-192.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#008000">
-  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
   <!-- Open Graph: imagen que aparece al compartir en WhatsApp -->
   <!-- OG_META_START -->
   <meta property="og:title" content="DS Distribuidora San Francisco No.2">
@@ -1505,8 +1505,20 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 <div class="modal-overlay" id="checkoutModal">
   <div class="modal">
     <h3>Confirmar Pedido</h3>
-    <div class="form-group"><label>Nombre Completo *</label><input type="text" id="buyerName" placeholder="Tu nombre completo"></div>
-    <div class="form-group"><label>Contacto (teléfono o email) *</label><input type="text" id="buyerContact" placeholder="5555-1234"></div>
+    <div class="form-group"><label>Tipo de cliente *</label>
+      <div style="display:flex;gap:1.2rem;flex-wrap:wrap;padding:.3rem 0">
+        <label style="display:flex;align-items:center;gap:.4rem;font-weight:600"><input type="radio" name="buyerType" value="persona" checked onchange="toggleBuyerType()"> Persona</label>
+        <label style="display:flex;align-items:center;gap:.4rem;font-weight:600"><input type="radio" name="buyerType" value="negocio" onchange="toggleBuyerType()"> Negocio</label>
+      </div>
+    </div>
+    <div id="buyerPersonaBox">
+      <div class="form-group"><label>Nombre *</label><input type="text" id="buyerFirstName" placeholder="Tu nombre" autocomplete="given-name"></div>
+      <div class="form-group"><label>Apellido *</label><input type="text" id="buyerLastName" placeholder="Tu apellido" autocomplete="family-name"></div>
+    </div>
+    <div id="buyerNegocioBox" style="display:none">
+      <div class="form-group"><label>Nombre del negocio *</label><input type="text" id="buyerBusiness" placeholder="Nombre de tu negocio" autocomplete="organization"></div>
+    </div>
+    <div class="form-group"><label>WhatsApp o Gmail *</label><input type="text" id="buyerContact" placeholder="Ej: 5555-1234 o tunombre@gmail.com" inputmode="email" autocomplete="off"></div>
     <div class="form-group">
       <label>Departamento *</label>
       <select id="buyerDept" onchange="loadMunicipios()"><option value="">Selecciona</option></select>
@@ -2450,14 +2462,32 @@ function onBuyerAldeaChange(){
   const aldeaBox=document.getElementById("buyerAldeaNewBox"); if(aldeaBox) aldeaBox.style.display = val==="__new__" ? "flex" : "none";
   updateCheckoutTotal();
 }
+function isValidWaOrGmail(v){
+  const s=(v||"").trim();
+  if(!s) return false;
+  if(s.includes("@")) return /^[a-zA-Z0-9._%+-]+@gmail\.com$/i.test(s);
+  const digits=s.replace(/[^0-9]/g,"");
+  return digits.length>=8;
+}
+function toggleBuyerType(){
+  const t=(document.querySelector('input[name="buyerType"]:checked')||{}).value||"persona";
+  const p=document.getElementById("buyerPersonaBox"), n=document.getElementById("buyerNegocioBox");
+  if(p) p.style.display = t==="persona" ? "block" : "none";
+  if(n) n.style.display = t==="negocio" ? "block" : "none";
+}
 function placeOrder(){
-  const name=document.getElementById("buyerName").value.trim();
+  const buyerType=(document.querySelector('input[name="buyerType"]:checked')||{}).value||"persona";
+  const firstName=(document.getElementById("buyerFirstName")?.value||"").trim();
+  const lastName=(document.getElementById("buyerLastName")?.value||"").trim();
+  const business=(document.getElementById("buyerBusiness")?.value||"").trim();
+  const name = buyerType==="negocio" ? business : ((firstName&&lastName) ? (firstName+" "+lastName) : "");
   const contact=document.getElementById("buyerContact").value.trim();
   const dept=document.getElementById("buyerDept").value;
   const mun=document.getElementById("buyerMun").value;
   const address=document.getElementById("buyerAddress").value.trim();
   const notes=document.getElementById("buyerNotes").value.trim();
   if(!name||!contact||!dept||!mun){toast("Completa todos los campos requeridos (*)","error");return;}
+  if(!isValidWaOrGmail(contact)){toast("Ingresa un número de WhatsApp válido o un correo de Gmail (@gmail.com)","error");return;}
   if(dept==="__new__"||mun==="__new__"){toast("Presiona 'Agregar' para confirmar tu departamento/municipio nuevo","error");return;}
   if(document.getElementById("buyerAldea")?.value==="__new__"){toast("Presiona 'Agregar' para confirmar tu lugar nuevo","error");return;}
   const selectedPayment=getSelectedPaymentMethod();
@@ -2478,7 +2508,7 @@ function placeOrder(){
   const order={id:nextOrderId(),date:new Date().toISOString(),status:"Pendiente",subtotal,shipping,total,
     payment:{key:selectedPayment.key,label:selectedPayment.label,icon:selectedPayment.icon},
     pickupStore:pickupStore?{id:pickupStore.id,nombre:pickupStore.nombre,direccion:pickupStore.direccion}:null,
-    customer:{name,contact,dept,mun,address,notes},items,mayoreoTipo:mayoreoTipo||null};
+    customer:{name,firstName:buyerType==="persona"?firstName:"",lastName:buyerType==="persona"?lastName:"",business:buyerType==="negocio"?business:"",tipo:buyerType,contact,dept,mun,address,notes},items,mayoreoTipo:mayoreoTipo||null};
   orders.push(order);
   localStorage.setItem("lx_orders",JSON.stringify(orders));
   if(window._fb && window._fb.ready()) window._fb.saveOrder(order);
@@ -4082,8 +4112,20 @@ function downloadAldeaTemplate(){
       <div class="add-address-form" id="addAddressForm">
         <h4 style="margin:0 0 1rem;font-family:'Plus Jakarta Sans'">Nueva Dirección</h4>
         <div class="form-group"><label>Alias (ej: Casa, Trabajo)</label><input type="text" id="addrAlias" placeholder="Casa"></div>
-        <div class="form-group"><label>Departamento</label><select id="addrDept" onchange="loadClientMunicipios()" style="width:100%"><option value="">Selecciona departamento</option></select></div>
-        <div class="form-group"><label>Municipio</label><select id="addrMun" style="width:100%"><option value="">Selecciona municipio</option></select></div>
+        <div class="form-group"><label>Departamento</label>
+          <select id="addrDept" onchange="onClientDeptChange()" style="width:100%"><option value="">Selecciona departamento</option></select>
+          <div id="addrDeptNewBox" style="display:none;gap:0.5rem;margin-top:0.5rem">
+            <input type="text" id="addrDeptNew" placeholder="Escribe tu departamento" style="flex:1">
+            <button type="button" class="btn btn-ghost" style="white-space:nowrap" onclick="confirmClientNewDept()">Agregar</button>
+          </div>
+        </div>
+        <div class="form-group"><label>Municipio</label>
+          <select id="addrMun" onchange="onClientMunChange()" style="width:100%"><option value="">Selecciona municipio</option></select>
+          <div id="addrMunNewBox" style="display:none;gap:0.5rem;margin-top:0.5rem">
+            <input type="text" id="addrMunNew" placeholder="Escribe tu municipio" style="flex:1">
+            <button type="button" class="btn btn-ghost" style="white-space:nowrap" onclick="confirmClientNewMun()">Agregar</button>
+          </div>
+        </div>
         <div class="form-group"><label>Dirección exacta</label><input type="text" id="addrDetail" placeholder="Calle, colonia, número..."></div>
         <div class="form-group"><label>Teléfono de contacto</label><input type="text" id="addrPhone" placeholder="502 XXXX XXXX"></div>
         <div style="display:flex;gap:0.8rem">
@@ -4410,29 +4452,81 @@ async function loadClientAddresses() {
 }
 
 function toggleAddAddressForm() {
-  document.getElementById("addAddressForm").classList.toggle("open");
+  const form = document.getElementById("addAddressForm");
+  form.classList.toggle("open");
+  if (form.classList.contains("open")) loadClientDeptSelect();
 }
 
 function loadClientDeptSelect() {
   const sel = document.getElementById("addrDept");
   if (!sel) return;
-  const geoData = window._geoData || window._fbInitGeoData;
-  if (!geoData || !geoData.departments) return;
+  const cur = sel.value;
   sel.innerHTML = '<option value="">Selecciona departamento</option>';
-  geoData.departments.forEach(d => { sel.innerHTML += `<option value="${d.name}">${d.name}</option>`; });
+  Object.keys(GT_DATA || {}).sort((a,b)=>a.localeCompare(b,'es')).forEach(d => {
+    const o = document.createElement("option"); o.value = d; o.textContent = d; sel.appendChild(o);
+  });
+  const n = document.createElement("option"); n.value = "__new__"; n.textContent = "Agregar departamento"; sel.appendChild(n);
+  if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 
-function loadClientMunicipios() {
+function onClientDeptChange() {
   const dept = document.getElementById("addrDept").value;
+  const deptBox = document.getElementById("addrDeptNewBox");
+  if (deptBox) deptBox.style.display = dept === "__new__" ? "flex" : "none";
+  const munBox = document.getElementById("addrMunNewBox");
+  if (munBox) munBox.style.display = "none";
+  fillClientMunSelect(dept);
+}
+
+function fillClientMunSelect(dept, selected) {
   const munSel = document.getElementById("addrMun");
   if (!munSel) return;
   munSel.innerHTML = '<option value="">Selecciona municipio</option>';
-  const geoData = window._geoData || window._fbInitGeoData;
-  if (!geoData || !geoData.departments) return;
-  const deptObj = geoData.departments.find(d => d.name === dept);
-  if (!deptObj || !deptObj.municipalities) return;
-  deptObj.municipalities.forEach(m => { munSel.innerHTML += `<option value="${m.name}">${m.name}</option>`; });
+  if (dept && dept !== "__new__") {
+    (GT_DATA[dept] || []).slice().sort((a,b)=>a.localeCompare(b,'es')).forEach(m => {
+      const o = document.createElement("option"); o.value = m; o.textContent = m; munSel.appendChild(o);
+    });
+    const n = document.createElement("option"); n.value = "__new__"; n.textContent = "Agregar municipio"; munSel.appendChild(n);
+  }
+  if (selected) munSel.value = selected;
 }
+
+function onClientMunChange() {
+  const mun = document.getElementById("addrMun").value;
+  const munBox = document.getElementById("addrMunNewBox");
+  if (munBox) munBox.style.display = mun === "__new__" ? "flex" : "none";
+}
+
+function confirmClientNewDept() {
+  const input = document.getElementById("addrDeptNew");
+  const val = input.value.trim();
+  if (!val) { toast("Escribe el nombre de tu departamento", "error"); return; }
+  if (!GT_DATA[val]) GT_DATA[val] = [];
+  if (typeof saveGeoDataMerge === "function") saveGeoDataMerge();
+  loadClientDeptSelect();
+  document.getElementById("addrDept").value = val;
+  document.getElementById("addrDeptNewBox").style.display = "none";
+  input.value = "";
+  fillClientMunSelect(val);
+  toast("Departamento agregado ✓", "success");
+}
+
+function confirmClientNewMun() {
+  const dept = document.getElementById("addrDept").value;
+  if (!dept || dept === "__new__") { toast("Primero agrega o selecciona el departamento", "error"); return; }
+  const input = document.getElementById("addrMunNew");
+  const val = input.value.trim();
+  if (!val) { toast("Escribe el nombre de tu municipio", "error"); return; }
+  if (!GT_DATA[dept]) GT_DATA[dept] = [];
+  if (!GT_DATA[dept].includes(val)) GT_DATA[dept].push(val);
+  if (typeof saveGeoDataMerge === "function") saveGeoDataMerge();
+  fillClientMunSelect(dept, val);
+  document.getElementById("addrMunNewBox").style.display = "none";
+  input.value = "";
+  toast("Municipio agregado ✓", "success");
+}
+
+function loadClientMunicipios() { onClientDeptChange(); }
 
 async function saveClientAddress() {
   if (!_client) return;
@@ -4442,6 +4536,7 @@ async function saveClientAddress() {
   const detail = document.getElementById("addrDetail").value.trim();
   const phone  = document.getElementById("addrPhone").value.trim();
   if (!dept || !mun) { toast("Selecciona departamento y municipio", "error"); return; }
+  if (dept === "__new__" || mun === "__new__") { toast("Presiona 'Agregar' para confirmar tu departamento o municipio nuevo", "error"); return; }
   const addr = { alias, dept, mun, detail, phone, createdAt: Date.now() };
   if (window._fb && window._fb.ready()) { const key = await window._fb.saveCustomerAddress(_client.uid, null, addr); addr._key = key; }
   else { addr._key = "addr_" + Date.now(); const saved = JSON.parse(localStorage.getItem("lx_client_addresses_" + _client.uid) || "[]"); saved.push(addr); localStorage.setItem("lx_client_addresses_" + _client.uid, JSON.stringify(saved)); }
@@ -4450,6 +4545,7 @@ async function saveClientAddress() {
   ["addrAlias","addrDetail","addrPhone"].forEach(id => { const el=document.getElementById(id); if(el) el.value=""; });
   document.getElementById("addrDept").value = "";
   document.getElementById("addrMun").innerHTML = '<option value="">Selecciona municipio</option>';
+  ["addrDeptNewBox","addrMunNewBox"].forEach(id => { const el=document.getElementById(id); if(el) el.style.display="none"; });
   loadClientAddresses();
 }
 
