@@ -824,6 +824,12 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 .social-login-btn.facebook-btn:hover { border-color: #1877F2; }
 /* FACEBOOK OCULTO hasta que Meta apruebe la verificación. Para mostrarlo de nuevo, borra la línea de abajo. */
 .social-login-btn.facebook-btn { display: none !important; }
+/* IMÁGENES DE PRODUCTO: las imágenes PNG transparentes se ven transparentes (sin fondo oscuro) */
+.product-img-wrap { background: transparent !important; }
+.product-img-wrap img { background: transparent !important; }
+.cart-item-img { background: transparent !important; }
+.pd-main-img { background: transparent !important; }
+.pd-gallery-thumb { background: transparent !important; }
 .client-divider { display: flex; align-items: center; gap: 1rem; margin: 1.2rem 0; color: var(--text-muted); font-size: 0.85rem; font-weight: 600; }
 .client-divider::before, .client-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .client-tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
@@ -1084,7 +1090,7 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
       <h4>Información de la Tienda</h4>
       <div class="form-group"><label>Nombre</label><input type="text" id="settingName" placeholder="Mi Tienda"></div>
       <div class="form-group"><label>Descripción / slogan</label><input type="text" id="settingDesc" placeholder="Los mejores productos..."></div>
-      <div class="form-group"><label>Logo (archivo)</label><input type="file" id="settingLogoFile" accept="image/*" onchange="previewLogoImg(this)"><img class="img-preview" id="logoPreview" src="" alt=""></div>
+      <div class="form-group"><label>Logo (archivo)</label><input type="file" id="settingLogoFile" accept="image/*,.png,.jpg,.jpeg,.jfif,.webp,.gif,.bmp,.svg,.avif,.heic,.heif,.tif,.tiff" onchange="previewLogoImg(this)"><img class="img-preview" id="logoPreview" src="" alt=""></div>
       <div class="form-group"><label>Logo (URL)</label><input type="text" id="settingLogoUrl" placeholder="https://..." oninput="previewLogoUrl(this)"></div>
       <div class="form-group"><label>WhatsApp del negocio</label><input type="text" id="settingWA" placeholder="50299887766"></div>
       <div class="form-group"><label>Credenciales (usuario:contraseña)</label><input type="text" id="settingCreds" placeholder="admin:password123"></div>
@@ -1491,7 +1497,7 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
       <div id="multiImgList" style="display:flex;flex-direction:column;gap:0.8rem;margin-bottom:1rem"></div>
       <div style="display:flex;gap:0.6rem;flex-wrap:wrap">
         <button type="button" class="btn btn-ghost" style="font-size:0.85rem;padding:0.5rem 1rem" onclick="addImgUrlRow()">+ Agregar URL</button>
-        <label class="btn btn-ghost" style="font-size:0.85rem;padding:0.5rem 1rem;cursor:pointer;margin:0">+ Subir archivo<input type="file" id="fImgFileMulti" accept="image/*" multiple onchange="addImgFileRows(this)" style="display:none"></label>
+        <label class="btn btn-ghost" style="font-size:0.85rem;padding:0.5rem 1rem;cursor:pointer;margin:0">+ Subir archivo<input type="file" id="fImgFileMulti" accept="image/*,.png,.jpg,.jpeg,.jfif,.webp,.gif,.bmp,.svg,.avif,.heic,.heif,.tif,.tiff" multiple onchange="addImgFileRows(this)" style="display:none"></label>
       </div>
       <!-- Legacy hidden fields for backward compat -->
       <input type="hidden" id="fImgData">
@@ -2887,28 +2893,65 @@ function addImgUrlRow(){
     if(inputs.length) inputs[inputs.length-1].focus();
   }, 50);
 }
-function addImgFileRows(input){
+function _fileExt(file){ return ((file.name||"").split(".").pop()||"").toLowerCase(); }
+function _readAsDataURL(file){
+  return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error||new Error("read")); r.readAsDataURL(file); });
+}
+function _loadImage(src){
+  return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("decode")); i.src=src; });
+}
+// Prepara la imagen respetando su formato: PNG sigue PNG (con transparencia), WebP sigue WebP,
+// JPG sigue JPG, GIF y SVG se conservan tal cual. Formatos que el navegador no puede leer
+// (HEIC, TIFF, etc.) se envían originales y Cloudinary los convierte.
+async function _prepareImageFile(file){
+  const ext=_fileExt(file), mime=(file.type||"").toLowerCase();
+  const MAXBYTES=9.5*1024*1024;
+  const original=await _readAsDataURL(file);
+  if(mime==="image/gif"||ext==="gif"||mime==="image/svg+xml"||ext==="svg"){
+    if(file.size>MAXBYTES){ toast(file.name+" pesa más de 10 MB","error"); return null; }
+    return original;
+  }
+  try{
+    const img=await _loadImage(original);
+    const ow=img.naturalWidth||img.width, oh=img.naturalHeight||img.height, max=1000;
+    let w=ow, h=oh;
+    if(w>max){h=Math.round(h*(max/w));w=max;} if(h>max){w=Math.round(w*(max/h));h=max;}
+    const isPng=(mime==="image/png"||ext==="png"), isWebp=(mime==="image/webp"||ext==="webp");
+    const outType=isPng?"image/png":(isWebp?"image/webp":"image/jpeg");
+    const canvas=document.createElement("canvas"); canvas.width=w; canvas.height=h;
+    const ctx=canvas.getContext("2d");
+    if(outType==="image/jpeg"){ ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,w,h); }
+    ctx.drawImage(img,0,0,w,h);
+    let out=canvas.toDataURL(outType,0.86);
+    if(out.indexOf("data:"+outType)!==0){ // el navegador no puede exportar ese formato
+      ctx.globalCompositeOperation="destination-over"; ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,w,h);
+      out=canvas.toDataURL("image/jpeg",0.86);
+    }
+    if(w===ow&&h===oh&&original.length<=out.length&&file.size<=MAXBYTES) return original;
+    return out;
+  }catch(e){
+    if(file.size>MAXBYTES){ toast(file.name+" pesa más de 10 MB","error"); return null; }
+    return original;
+  }
+}
+async function addImgFileRows(input){
   const files=[...input.files];
+  input.value="";
   const slots = 5 - _multiImgs.length;
-  if(slots<=0){toast("Máximo 5 imágenes","error");input.value="";return;}
+  if(slots<=0){toast("Máximo 5 imágenes","error");return;}
   const toAdd = files.slice(0, slots);
   if(files.length>slots) toast("Solo se agregarán "+slots+" imagen(es) (límite 5)","error");
-  let pending = toAdd.length;
-  toAdd.forEach(file=>{
-    const reader=new FileReader(); reader.onload=e=>{
-      const img=new Image(); img.onload=()=>{
-        const canvas=document.createElement("canvas"), max=900;
-        let w=img.width, h=img.height;
-        if(w>max){h=h*(max/w);w=max;} if(h>max){w=w*(max/h);h=max;}
-        canvas.width=w; canvas.height=h; canvas.getContext("2d").drawImage(img,0,0,w,h);
-        const data=canvas.toDataURL("image/jpeg",0.82);
-        _multiImgs.push({type:"base64", src:data});
-        pending--;
-        if(pending===0) _renderMultiImgList();
-      }; img.src=e.target.result;
-    }; reader.readAsDataURL(file);
-  });
-  input.value="";
+  for(const file of toAdd){
+    const okType=(file.type||"").indexOf("image/")===0 || /\.(png|jpe?g|jfif|webp|gif|bmp|svg|avif|heic|heif|tiff?)$/i.test(file.name||"");
+    if(!okType){ toast((file.name||"Archivo")+" no es una imagen","error"); continue; }
+    try{
+      const data=await _prepareImageFile(file);
+      if(data) _multiImgs.push({type:"base64", src:data});
+    }catch(err){
+      console.error(err); toast("No se pudo leer "+(file.name||"la imagen"),"error");
+    }
+  }
+  _renderMultiImgList();
 }
 
 function previewImg(input){ /* legacy — no-op */ }
@@ -2920,7 +2963,10 @@ async function uploadToImgBB(base64data){
   const res=await fetch("https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/image/upload",{method:"POST",body:formData});
   const json=await res.json();
   if(json.error) throw new Error("Cloudinary error: "+json.error.message);
-  return json.secure_url;
+  let u=json.secure_url||"";
+  // formatos que el navegador no muestra (HEIC, TIFF): se entregan como JPG
+  if(/\.(heic|heif|tiff?)$/i.test(u)) u=u.replace(/\.(heic|heif|tiff?)$/i,".jpg");
+  return u;
 }
 function previewUrl(input){ /* legacy no-op */ }
 
