@@ -1657,6 +1657,8 @@ function getPrecioProducto(p){
   if(mayoreoTipo==="docena"&&parseFloat(p.precio_docena)>0) return parseFloat(p.precio_docena);
   if(mayoreoTipo==="fardo"&&parseFloat(p.precio_fardo)>0) return parseFloat(p.precio_fardo);
   if(mayoreoTipo==="mayor"&&parseFloat(p.precio_mayor)>0) return parseFloat(p.precio_mayor);
+  // Si se eligió un tipo específico (MAYOR, ½ DOC, DOC, FARDO) y el producto no tiene ese precio, se muestra 0
+  if(["mayor","media_docena","docena","fardo"].indexOf(mayoreoTipo)!==-1) return 0;
   // Fallback: usar precio_mayoristas general si existe
   const precioEspecial=parseFloat(p.precio_mayoristas)||parseFloat(p.precio_uds)||0;
   if(precioEspecial>0) return precioEspecial;
@@ -1670,6 +1672,7 @@ function tieneEspecialActivo(p){
   if(mayoreoTipo==="docena"&&parseFloat(p.precio_docena)>0) return true;
   if(mayoreoTipo==="fardo"&&parseFloat(p.precio_fardo)>0) return true;
   if(mayoreoTipo==="mayor"&&parseFloat(p.precio_mayor)>0) return true;
+  if(["mayor","media_docena","docena","fardo"].indexOf(mayoreoTipo)!==-1) return false;
   if((parseFloat(p.precio_mayoristas)||0)>0) return true;
   return false;
 }
@@ -2229,6 +2232,9 @@ function goPage(n){currentPage=n;renderShop();window.scrollTo({top:0,behavior:"s
 
 function addToCart(id){
   const p=products.find(x=>x.id===id); if(!p||p.stock<=0)return;
+  if(mayoreoMode&&mayoreoTipo&&mayoreoTipo!=="publico"&&!(getPrecioProducto(p)>0)){
+    toast("Este producto no tiene precio "+((MAYOREO_SUB_TIPOS[mayoreoTipo]||{}).label||"mayorista"),"error"); return;
+  }
   const ci=cart.find(x=>x.id===id);
   if(ci){if(ci.qty<p.stock)ci.qty++;else{toast("No hay mas stock","error");return;}}
   else cart.push({id,qty:1});
