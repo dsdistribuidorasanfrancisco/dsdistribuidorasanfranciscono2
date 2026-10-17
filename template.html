@@ -63,34 +63,34 @@ try {
 
 // ── Firebase Auth state listener ──────────────────────────────
 const ADMIN_EMAIL = "dsdistribuidorasanfrancisco@gmail.com";
-const ADMIN_PASS  = "sfcmayoreo123";
 let _fbAuthReady = false;
 if (_fbAuth) {
   onAuthStateChanged(_fbAuth, user => {
     _fbAuthReady = !!user;
   });
-  // Auto login al cargar la página — así orders y otros nodos protegidos
-  // funcionan desde el inicio sin esperar que el admin entre al panel
-  signInWithEmailAndPassword(_fbAuth, ADMIN_EMAIL, ADMIN_PASS)
-    .then(() => { _fbAuthReady = true; })
-    .catch(e => console.warn("Firebase Auth auto-login:", e.message));
 }
-async function _fbSignIn() {
-  if (!_fbAuth) return false;
+// Ya no hay contraseña en el código: el administrador entra escribiendo su contraseña en el panel.
+async function _fbSignIn() { return _fbAuthReady; }
+window._fbAdminLogin = async (email, pass) => {
+  if (!_fbAuth) return { ok: false };
   try {
-    await signInWithEmailAndPassword(_fbAuth, ADMIN_EMAIL, ADMIN_PASS);
+    const cred = await signInWithEmailAndPassword(_fbAuth, (email || ADMIN_EMAIL).trim(), pass);
+    if ((cred.user.email || "").toLowerCase() !== ADMIN_EMAIL.toLowerCase()) {
+      await signOut(_fbAuth);
+      return { ok: false };
+    }
     _fbAuthReady = true;
-    return true;
-  } catch(e) {
-    console.warn("Firebase Auth:", e.message);
-    return false;
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, err: e.message };
   }
-}
+};
 async function _fbSignOut() {
   if (!_fbAuth) return;
   try { await signOut(_fbAuth); } catch(e) {}
   _fbAuthReady = false;
 }
+window._fbSignOut = _fbSignOut;
 
 // ── Exponer funciones al scope global ─────────────────────────
 window._fb = {
@@ -122,6 +122,21 @@ window._fb = {
         cb([]);
       }
     });
+  },
+
+  // ── Reseñas de productos: reviews/{producto}/{uid del cliente} ──
+  watchReviews: (cb) => {
+    if (!fbReady) return;
+    onValue(ref(db, "reviews"), snap => { cb(snap.val() || {}); },
+      err => { console.warn("Reseñas:", err.message); });
+  },
+  addReview: async (productKey, uid, review) => {
+    if (!fbReady) throw new Error("Sin conexión");
+    await set(ref(db, "reviews/" + productKey + "/" + uid), review);
+  },
+  deleteReview: async (productKey, uid) => {
+    if (!fbReady) return;
+    await remove(ref(db, "reviews/" + productKey + "/" + uid));
   },
 
   // Escucha configuración de tienda
@@ -173,17 +188,86 @@ window._fb = {
     const { _key, ...data } = order;
     const newRef = push(ref(db, "orders"));
     await set(newRef, data);
+    // Seguimiento público: solo estado y destino, sin datos personales
+    try {
+      await set(ref(db, "tracking/" + order.id), {
+        id: order.id, date: order.date, status: order.status, total: order.total,
+        pickupStore: order.pickupStore || null,
+        customer: { dept: (order.customer && order.customer.dept) || "", mun: (order.customer && order.customer.mun) || "" },
+        trackingGuia: "", trackingNote: "", trackingUrl: ""
+      });
+    } catch (e) { console.warn("tracking:", e.message); }
+    // Copia del pedido en la cuenta del cliente
+    if (order.customerUid) {
+      try { await set(ref(db, "customers/" + order.customerUid + "/orders/" + newRef.key), data); } catch (e) { console.warn("cliente:", e.message); }
+    }
     return newRef.key;
+  },
+  // Número de pedido consecutivo (cada cliente toma el siguiente número)
+  reserveOrderId: async () => {
+    if (!fbReady) return null;
+    const r = ref(db, "meta/orderCounter");
+    for (let i = 0; i < 6; i++) {
+      const snap = await get(r);
+      const cur = snap.val();
+      if (typeof cur !== "number") return null;
+      try { await set(r, cur + 1); return cur + 1; } catch (e) { /* otro cliente tomó ese número: reintentar */ }
+    }
+    return null;
+  },
+  // Descuento de stock hecho por un cliente (solo puede bajar el stock)
+  updateStock: async (map) => {
+    if (!fbReady) return;
+    const up = {};
+    Object.entries(map).forEach(([k, v]) => { up["products/" + k + "/stock"] = v; });
+    await update(ref(db), up);
+  },
+  // Consultar el seguimiento público de un pedido por su número
+  getTracking: async (id) => {
+    if (!fbReady) return null;
+    const snap = await get(ref(db, "tracking/" + id));
+    return snap.val();
+  },
+  // Administrador: sincroniza seguimiento público, cuentas de clientes y contador de pedidos
+  syncOrderMirrors: async (arr) => {
+    if (!fbReady) return;
+    const up = {};
+    let maxId = 1000;
+    (arr || []).forEach(o => {
+      if (!o._key) return;
+      if (typeof o.id === "number" && o.id > maxId) maxId = o.id;
+      up["tracking/" + o.id] = {
+        id: o.id, date: o.date, status: o.status, total: o.total, pickupStore: o.pickupStore || null,
+        customer: { dept: (o.customer && o.customer.dept) || "", mun: (o.customer && o.customer.mun) || "" },
+        trackingGuia: o.trackingGuia || "", trackingNote: o.trackingNote || "", trackingUrl: o.trackingUrl || ""
+      };
+      if (o.customerUid) { const { _key, ...d } = o; up["customers/" + o.customerUid + "/orders/" + o._key] = d; }
+    });
+    const cs = await get(ref(db, "meta/orderCounter"));
+    const cur = cs.val();
+    if (typeof cur !== "number" || cur < maxId) up["meta/orderCounter"] = maxId;
+    up["settings/credentials"] = null;
+    await update(ref(db), up);
   },
 
   // Actualizar estado de pedido (status + nota + guía)
-  updateOrderStatus: async (key, status) => {
+  updateOrderStatus: async (key, status, o) => {
     if (!fbReady || !key) return;
-    await update(ref(db, "orders/" + key), { status });
+    const up = {};
+    up["orders/" + key + "/status"] = status;
+    if (o && o.id) up["tracking/" + o.id + "/status"] = status;
+    if (o && o.customerUid) up["customers/" + o.customerUid + "/orders/" + key + "/status"] = status;
+    await update(ref(db), up);
   },
-  updateOrderTracking: async (key, data) => {
+  updateOrderTracking: async (key, data, o) => {
     if (!fbReady || !key) return;
-    await update(ref(db, "orders/" + key), data);
+    const up = {};
+    Object.entries(data || {}).forEach(([k, v]) => {
+      up["orders/" + key + "/" + k] = v;
+      if (o && o.id) up["tracking/" + o.id + "/" + k] = v;
+      if (o && o.customerUid) up["customers/" + o.customerUid + "/orders/" + key + "/" + k] = v;
+    });
+    await update(ref(db), up);
   },
 
   // Guardar configuración
@@ -239,14 +323,17 @@ window._fb = {
   },
   getCustomerOrders: async (uid) => {
     if (!fbReady) return [];
-    const snap = await get(ref(db, "orders"));
+    const snap = await get(ref(db, "customers/" + uid + "/orders"));
     const d = snap.val();
-    if (!d) return [];
-    return Object.entries(d).map(([k,v])=>({_key:k,...v})).filter(o => o.customerUid === uid);
+    return d ? Object.entries(d).map(([k,v])=>({_key:k,...v})) : [];
   },
-  linkOrderToCustomer: async (orderKey, uid) => {
+  linkOrderToCustomer: async (orderKey, uid, order) => {
     if (!fbReady || !orderKey) return;
-    await update(ref(db, "orders/" + orderKey), { customerUid: uid });
+    await set(ref(db, "orders/" + orderKey + "/customerUid"), uid);
+    if (order) {
+      const { _key, ...d } = order; d.customerUid = uid;
+      await set(ref(db, "customers/" + uid + "/orders/" + orderKey), d);
+    }
   },
 };
 
@@ -291,6 +378,7 @@ window._clientAuth = {
     } catch(e) { return { ok: false, err: e.message }; }
   },
   logout: async () => {
+    try { await signOut(_fbAuth); } catch(e) {}
     window._currentClient = null;
     localStorage.removeItem("lx_client_session");
   }
@@ -830,6 +918,45 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 .cart-item-img { background: transparent !important; }
 .pd-main-img { background: transparent !important; }
 .pd-gallery-thumb { background: transparent !important; }
+/* ═══ RESEÑAS DE PRODUCTOS ═══ */
+.rv-block { margin: 0.4rem 0 0.5rem; }
+.rv-stars-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.rv-stars { display: inline-flex; }
+.rv-star { background: none; border: none; padding: 0 0.04rem; font-size: 1.45rem; line-height: 1; color: #cbd5e1; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.rv-star.on { color: #f59e0b; }
+.rv-avg { font-size: 0.78rem; color: var(--text-muted); font-weight: 600; }
+.rv-hint { font-size: 0.68rem; color: var(--text-muted); width: 100%; }
+.rv-see-btn { margin-top: 0.3rem; background: none; border: 1px solid var(--border); border-radius: 100px; padding: 0.28rem 0.75rem; font-size: 0.75rem; font-weight: 700; color: var(--accent); cursor: pointer; font-family: inherit; }
+.rv-overlay { position: fixed; inset: 0; background: rgba(15,23,42,0.55); z-index: 6000; display: none; align-items: flex-end; justify-content: center; }
+.rv-overlay.open { display: flex; }
+.rv-sheet { background: #fff; color: #0f172a; width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto; border-radius: 20px 20px 0 0; padding: 1.2rem 1.2rem 1.6rem; }
+@media (min-width: 700px) { .rv-overlay { align-items: center; } .rv-sheet { border-radius: 20px; } }
+.rv-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; font-size: 1.1rem; }
+.rv-close { background: #f1f5f9; border: none; border-radius: 50%; width: 34px; height: 34px; font-size: 1rem; cursor: pointer; }
+.rv-prodname { font-size: 0.9rem; color: #475569; margin-bottom: 0.6rem; }
+.rv-bigstars { display: flex; justify-content: center; gap: 0.2rem; margin: 0.4rem 0 1rem; }
+.rv-bigstars .rv-star { font-size: 2.6rem; padding: 0 0.1rem; }
+.rv-actions { display: flex; flex-direction: column; gap: 0.6rem; }
+.rv-sheet textarea { width: 100%; min-height: 90px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.7rem; font-family: inherit; font-size: 0.95rem; margin: 0.6rem 0; resize: vertical; box-sizing: border-box; }
+.rv-photo-row { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+.rv-photo-prev { width: 64px; height: 64px; object-fit: cover; border-radius: 10px; border: 1px solid #e2e8f0; display: none; }
+.rv-summary { display: flex; gap: 1.2rem; align-items: center; margin: 0.4rem 0 1rem; }
+.rv-summary-num { font-size: 2.6rem; font-weight: 800; line-height: 1; }
+.rv-summary-stars { color: #f59e0b; font-size: 1.1rem; }
+.rv-summary-count { font-size: 0.8rem; color: #64748b; }
+.rv-dist { flex: 1; }
+.rv-dist-row { display: flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; color: #475569; margin: 2px 0; }
+.rv-dist-bar { flex: 1; height: 7px; background: #e2e8f0; border-radius: 100px; overflow: hidden; }
+.rv-dist-fill { height: 100%; background: #f59e0b; }
+.rv-item { border-top: 1px solid #e2e8f0; padding: 0.8rem 0; }
+.rv-item-top { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.rv-item-name { font-weight: 700; font-size: 0.9rem; }
+.rv-item-date { font-size: 0.72rem; color: #94a3b8; }
+.rv-item-stars { color: #f59e0b; font-size: 0.95rem; letter-spacing: 1px; }
+.rv-item-text { font-size: 0.9rem; margin-top: 0.3rem; color: #334155; white-space: pre-wrap; word-break: break-word; }
+.rv-item-photo { width: 84px; height: 84px; object-fit: cover; border-radius: 10px; margin-top: 0.5rem; cursor: pointer; border: 1px solid #e2e8f0; }
+.rv-item-del { background: none; border: none; color: #dc2626; font-size: 0.75rem; cursor: pointer; font-weight: 700; }
+.rv-empty { text-align: center; color: #64748b; padding: 1.2rem 0; font-size: 0.9rem; }
 .client-divider { display: flex; align-items: center; gap: 1rem; margin: 1.2rem 0; color: var(--text-muted); font-size: 0.85rem; font-weight: 600; }
 .client-divider::before, .client-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .client-tabs { display: flex; gap: 0; margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
@@ -1093,7 +1220,7 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
       <div class="form-group"><label>Logo (archivo)</label><input type="file" id="settingLogoFile" accept="image/*,.png,.jpg,.jpeg,.jfif,.webp,.gif,.bmp,.svg,.avif,.heic,.heif,.tif,.tiff" onchange="previewLogoImg(this)"><img class="img-preview" id="logoPreview" src="" alt=""></div>
       <div class="form-group"><label>Logo (URL)</label><input type="text" id="settingLogoUrl" placeholder="https://..." oninput="previewLogoUrl(this)"></div>
       <div class="form-group"><label>WhatsApp del negocio</label><input type="text" id="settingWA" placeholder="50299887766"></div>
-      <div class="form-group"><label>Credenciales (usuario:contraseña)</label><input type="text" id="settingCreds" placeholder="admin:password123"></div>
+      <div class="form-group"><label>Acceso al panel</label><div style="font-size:0.85rem;color:var(--text-muted)">El panel ahora se abre con la contraseña de administrador de Firebase. Para cambiarla: Firebase → Authentication → Usuarios.</div></div>
       <button class="btn btn-save" onclick="saveStoreSettings()">Guardar Cambios</button>
     </div>
     <div class="settings-card">
@@ -1614,7 +1741,7 @@ let GT_ALDEAS = {};
 let products=[], orders=[], cart=[];
 let editingId=null, loggedIn=false, currentPage=1;
 const PAGE_SIZE=24;
-let storeSettings={name:"DS DISTRIBUIDORA SAN FRANCISCO NO.2",desc:"Los mejores productos al mejor precio",logo:"",waNumber:"",credentials:"Dssanfrancisco:sfu2026",mayoreoConfig:null,shippingZones:{},defaultShipping:25,freeShippingAt:300,
+let storeSettings={name:"DS DISTRIBUIDORA SAN FRANCISCO NO.2",desc:"Los mejores productos al mejor precio",logo:"",waNumber:"",credentials:"",mayoreoConfig:null,shippingZones:{},defaultShipping:25,freeShippingAt:300,
   paymentMethods:{
     cod:{enabled:true,label:"Pago Contra Entrega",icon:"🚚",desc:""},
     transfer:{enabled:false,label:"Transferencia Bancaria",icon:"🏦",desc:""},
@@ -1719,12 +1846,13 @@ function saveOrders(){
 function saveCart(){localStorage.setItem("lx_cart",JSON.stringify(cart))}
 function saveSettings(){
   localStorage.setItem("lx_settings",JSON.stringify(storeSettings));
-  if(window._fb && window._fb.ready()) window._fb.saveSettings(storeSettings);
+  if(window._fb && window._fb.ready()){ const {credentials:_c,...pub}=storeSettings; window._fb.saveSettings(pub); }
 }
 function nextId(){return products.length?Math.max(...products.map(p=>p.id))+1:1}
 function nextOrderId(){return orders.length?Math.max(...orders.map(o=>o.id))+1:1001}
 
 function init(){
+  try{localStorage.removeItem("lx_orders");}catch(e){} // pedidos de otros clientes: ya no se guardan en el navegador
   // Cargar carrito local (siempre local por usuario)
   cart=JSON.parse(localStorage.getItem("lx_cart")||"[]");
 
@@ -1785,11 +1913,6 @@ function init(){
       localStorage.setItem("lx_products",JSON.stringify(products));
       renderShop();
       if(loggedIn) renderAdminProducts();
-    });
-    window._fb.watchOrders(arr=>{
-      orders=arr;
-      localStorage.setItem("lx_orders",JSON.stringify(arr));
-      if(loggedIn) renderAdminOrders();
     });
     window._fb.watchSettings(s=>{
       Object.assign(storeSettings,s);
@@ -2200,6 +2323,7 @@ function renderShop(){
         "<div class='product-name' onclick='openProductDetail("+p.id+")' style='cursor:pointer'>"+p.name+"</div>"+
         (p.sku?"<div class='product-sku'>Cod: "+p.sku+"</div>":"")+
         "<div class='product-desc'>"+(p.desc||"")+"</div>"+
+        ratingBlockHTML(p)+
         "<div class='product-footer'>"+
           "<div>"+
             (tieneEspecial?"<div style='font-size:0.8rem;color:var(--text-muted);text-decoration:line-through'>Q"+p.price.toFixed(2)+"</div>":"")+
@@ -2487,7 +2611,26 @@ function toggleBuyerType(){
   if(p) p.style.display = t==="persona" ? "block" : "none";
   if(n) n.style.display = t==="negocio" ? "block" : "none";
 }
-function placeOrder(){
+async function _reserveOrderId(){
+  try{
+    if(window._fb&&window._fb.ready()&&window._fb.reserveOrderId){
+      const id=await window._fb.reserveOrderId();
+      if(id) return id;
+    }
+  }catch(e){console.warn("reserveOrderId",e);}
+  if(orders.length) return Math.max(...orders.map(o=>o.id))+1;
+  return 1000000+Math.floor(Date.now()/1000)%9000000;
+}
+function saveStockAfterOrder(items){
+  localStorage.setItem("lx_products",JSON.stringify(products));
+  if(!(window._fb&&window._fb.ready())) return;
+  if(typeof loggedIn!=="undefined"&&loggedIn){ window._fb.saveProducts(products); return; }
+  const upd={};
+  items.forEach(it=>{const p=products.find(x=>x.id===it.id); if(p&&p._key) upd[p._key]=p.stock;});
+  if(Object.keys(upd).length) window._fb.updateStock(upd).catch(e=>console.warn("stock:",e));
+}
+async function placeOrder(){
+  if(window._placingOrder) return;
   const buyerType=(document.querySelector('input[name="buyerType"]:checked')||{}).value||"persona";
   const firstName=(document.getElementById("buyerFirstName")?.value||"").trim();
   const lastName=(document.getElementById("buyerLastName")?.value||"").trim();
@@ -2515,15 +2658,18 @@ function placeOrder(){
   }
   const{subtotal,shipping,total}=updateCheckoutTotal();
   const items=cart.map(ci=>{const p=products.find(x=>x.id===ci.id);const pu=p?getPrecioCarritoItem(p,ci.qty).precio:0;return p?{id:p.id,name:p.name,price:pu,qty:ci.qty}:null;}).filter(Boolean);
+  window._placingOrder=true; setTimeout(()=>{window._placingOrder=false;},4000);
+  const _oid=await _reserveOrderId();
   items.forEach(it=>{const p=products.find(x=>x.id===it.id);if(p)p.stock=Math.max(0,p.stock-it.qty);});
-  saveProducts();
-  const order={id:nextOrderId(),date:new Date().toISOString(),status:"Pendiente",subtotal,shipping,total,
+  saveStockAfterOrder(items);
+  const order={id:_oid,date:new Date().toISOString(),status:"Pendiente",subtotal,shipping,total,
     payment:{key:selectedPayment.key,label:selectedPayment.label,icon:selectedPayment.icon},
     pickupStore:pickupStore?{id:pickupStore.id,nombre:pickupStore.nombre,direccion:pickupStore.direccion}:null,
     customer:{name,firstName:buyerType==="persona"?firstName:"",lastName:buyerType==="persona"?lastName:"",business:buyerType==="negocio"?business:"",tipo:buyerType,contact,dept,mun,address,notes},items,mayoreoTipo:mayoreoTipo||null};
+  if(typeof _client!=="undefined" && _client) order.customerUid=_client.uid;
   orders.push(order);
   localStorage.setItem("lx_orders",JSON.stringify(orders));
-  if(window._fb && window._fb.ready()) window._fb.saveOrder(order);
+  if(window._fb && window._fb.ready()) window._fb.saveOrder(order).then(k=>{ if(k) order._key=k; }).catch(e=>console.warn("saveOrder:",e));
   const wa=storeSettings.waNumber;
   if(wa){
     const tipoLabel=PRECIO_TIPOS[mayoreoTipo||"publico"]?.label||"Público";
@@ -2554,11 +2700,20 @@ function goTrackOrder(){
 }
 
 const STEPS=["Pendiente","En Proceso","En Ruta","Entregado","Cancelado"];
-function doTrack(){
+async function doTrack(){
   const q=document.getElementById("trackInput").value.trim().toLowerCase();
   const res=document.getElementById("trackResult");
   if(!q){res.innerHTML="";return;}
-  const found=orders.filter(o=>String(o.id)===q||o.customer?.name?.toLowerCase().includes(q)||o.customer?.contact?.toLowerCase().includes(q));
+  let found=[];
+  if(typeof loggedIn!=="undefined"&&loggedIn&&orders.length){
+    found=orders.filter(o=>String(o.id)===q||o.customer?.name?.toLowerCase().includes(q)||o.customer?.contact?.toLowerCase().includes(q));
+  } else if(/^[0-9]+$/.test(q)&&window._fb&&window._fb.ready()){
+    res.innerHTML="<div class='track-result' style='text-align:center;color:var(--text-muted);font-weight:500;'>Buscando...</div>";
+    try{ const t=await window._fb.getTracking(q); if(t) found=[t]; }catch(e){ console.warn(e); }
+  } else {
+    res.innerHTML="<div class='track-result' style='text-align:center;color:var(--text-muted);font-weight:500;'>Escribe tu número de pedido (solo números).</div>";
+    return;
+  }
   if(!found.length){res.innerHTML="<div class='track-result' style='text-align:center;color:var(--text-muted);font-weight:500;'>No se encontraron pedidos con esos datos.</div>";return;}
   res.innerHTML=found.map(o=>{
     const isCancelled=o.status==="Cancelado";
@@ -2602,20 +2757,42 @@ function doTrack(){
   }).join("");
 }
 
-function doLogin(){
-  const user=document.getElementById("loginUser").value.trim();
-  const pass=document.getElementById("loginPass").value.trim();
-  const[cu,cp]=(storeSettings.credentials||"distribuidora:genesis2024").split(":");
-  if(user===cu&&pass===cp){
-    loggedIn=true;
-    document.getElementById("adminNavBtn").style.display="";
-    document.getElementById("adminLoginBtn").style.display="none";
-    showPage("admin");
-    // Firebase Auth en segundo plano — no bloquea el ingreso al panel
-    if(typeof _fbSignIn==="function") _fbSignIn().catch(()=>{});
-  } else toast("Credenciales incorrectas","error");
+let _ordersWatching=false, _mirrorsSynced=false;
+function startAdminOrdersWatch(){
+  if(_ordersWatching||!(window._fb&&window._fb.ready()))return;
+  _ordersWatching=true;
+  window._fb.watchOrders(arr=>{
+    orders=arr;
+    localStorage.setItem("lx_orders",JSON.stringify(arr));
+    if(loggedIn) renderAdminOrders();
+    if(!_mirrorsSynced){
+      _mirrorsSynced=true;
+      if(window._fb.syncOrderMirrors) window._fb.syncOrderMirrors(arr).catch(e=>console.warn("sync:",e));
+    }
+  });
 }
-async function doLogout(){loggedIn=false;document.getElementById("adminNavBtn").style.display="none";document.getElementById("adminLoginBtn").style.display="";await _fbSignOut();showPage("shop");}
+async function doLogin(){
+  const user=document.getElementById("loginUser").value.trim();
+  const pass=document.getElementById("loginPass").value;
+  if(!pass){toast("Escribe la contraseña","error");return;}
+  if(!window._fbAdminLogin){toast("Sin conexión con Firebase","error");return;}
+  const r=await window._fbAdminLogin(user.includes("@")?user:"",pass);
+  if(!r.ok){toast("Credenciales incorrectas","error");return;}
+  loggedIn=true;
+  storeSettings.credentials="";
+  document.getElementById("adminNavBtn").style.display="";
+  document.getElementById("adminLoginBtn").style.display="none";
+  startAdminOrdersWatch();
+  showPage("admin");
+}
+async function doLogout(){
+  loggedIn=false; _ordersWatching=false; _mirrorsSynced=false;
+  orders=[]; try{localStorage.removeItem("lx_orders");}catch(e){}
+  document.getElementById("adminNavBtn").style.display="none";
+  document.getElementById("adminLoginBtn").style.display="";
+  try{ if(window._fbSignOut) await window._fbSignOut(); }catch(e){}
+  showPage("shop");
+}
 
 function switchAdminTab(tab,el){
   document.querySelectorAll(".admin-tab").forEach(t=>t.classList.remove("active"));
@@ -3021,7 +3198,7 @@ function changeOrderStatus(id,status){
     o.status=status;
     localStorage.setItem("lx_orders",JSON.stringify(orders));
     if(window._fb && window._fb.ready() && o._key){
-      window._fb.updateOrderStatus(o._key, status);
+      window._fb.updateOrderStatus(o._key, status, o);
     }
     toast("Estado actualizado","success");
     renderAdminOrders();
@@ -3035,7 +3212,7 @@ function saveOrderTracking(id, guia, nota, url){
   o.trackingUrl=(url||"").trim();
   localStorage.setItem("lx_orders",JSON.stringify(orders));
   if(window._fb && window._fb.ready() && o._key){
-    window._fb.updateOrderTracking(o._key,{trackingGuia:o.trackingGuia,trackingNote:o.trackingNote,trackingUrl:o.trackingUrl});
+    window._fb.updateOrderTracking(o._key,{trackingGuia:o.trackingGuia,trackingNote:o.trackingNote,trackingUrl:o.trackingUrl},o);
   }
   toast("Guía/Nota guardada","success");
 }
@@ -3078,7 +3255,7 @@ function saveStoreSettings(){
   storeSettings.name=document.getElementById("settingName").value.trim()||"DS DISTRIBUIDORA SAN FRANCISCO NO.2";
   storeSettings.desc=document.getElementById("settingDesc").value.trim();
   storeSettings.waNumber=document.getElementById("settingWA").value.trim();
-  storeSettings.credentials=document.getElementById("settingCreds").value.trim()||"distribuidora:genesis2024";
+  storeSettings.credentials="";
   const url=document.getElementById("settingLogoUrl").value.trim();
   const file=document.getElementById("settingLogoFile").files[0];
   if(file){const r=new FileReader();r.onload=e=>{storeSettings.logo=e.target.result;saveSettings();applyStoreSettings();toast("Tienda guardada","success");};r.readAsDataURL(file);}
@@ -3515,6 +3692,7 @@ function openProductDetail(id) {
   const p = products.find(x => x.id === id);
   if (!p) return;
   _pdCurrentId = id;
+  if (typeof renderPdReviewBlock === "function") renderPdReviewBlock();
   const precio = getPrecioProducto(p);
   const avail = p.stock > 0;
   const tieneOferta = (!mayoreoMode||mayoreoTipo==="publico"||!mayoreoTipo) && p.precio_oferta && p.precio_oferta>0 && p.precio_oferta<p.price;
@@ -4091,6 +4269,7 @@ function downloadAldeaTemplate(){
     <div id="pdExtraInfo2" style="display:none;font-size:0.85rem;color:var(--orange);font-weight:700;margin-top:0.2rem"></div>
     <div class="pd-avail" id="pdStock2"></div>
     <div class="pd-desc2" id="pdDesc2"></div>
+    <div id="pdReviewBlock" style="margin-top:1rem"></div>
   </div>
   <div class="pd-fixed-bar">
     <button class="pd-btn-add" id="pdBtnCart2" onclick="pdAddToCart()">🛒 Agregar al carrito</button>
@@ -4317,8 +4496,11 @@ document.addEventListener("DOMContentLoaded", () => {
     _client = { uid: user.uid, name: user.displayName||"", email: user.email, photo: user.photoURL||"" };
     localStorage.setItem("lx_client_session", JSON.stringify(_client));
     updateClientNavbar();
-    showPage("client-dashboard");
-    loadClientDashboard();
+    // Solo abrir "Mi cuenta" si el cliente acaba de iniciar sesión (no al restaurar la sesión)
+    if (document.querySelector("#page-client-login.active")) {
+      showPage("client-dashboard");
+      loadClientDashboard();
+    }
   };
 });
 
@@ -4645,6 +4827,253 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   });
 }
+</script>
+<div class="rv-overlay" id="rvFormOverlay" onclick="if(event.target===this)closeReviewForm()">
+  <div class="rv-sheet">
+    <div class="rv-head"><strong>Tu reseña</strong><button type="button" class="rv-close" onclick="closeReviewForm()">✕</button></div>
+    <div class="rv-prodname" id="rvFormProduct"></div>
+    <div class="rv-bigstars" id="rvBigStars"></div>
+    <div class="rv-actions" id="rvChoiceBtns" style="display:none">
+      <button type="button" class="btn btn-save" onclick="submitReview(false)">⭐ Enviar solo estrellas</button>
+      <button type="button" class="btn btn-ghost" onclick="showReviewComment()">💬 Agregar comentario</button>
+    </div>
+    <div id="rvCommentBox" style="display:none">
+      <textarea id="rvComment" maxlength="500" placeholder="Cuéntanos qué te pareció el producto (opcional)"></textarea>
+      <div class="rv-photo-row">
+        <label for="rvPhoto" class="btn btn-ghost" style="cursor:pointer">📷 Agregar foto</label>
+        <input type="file" id="rvPhoto" accept="image/*" style="display:none" onchange="onReviewPhoto(this)">
+        <img id="rvPhotoPrev" class="rv-photo-prev" alt="">
+        <button type="button" id="rvPhotoDel" class="rv-item-del" style="display:none" onclick="clearReviewPhoto()">Quitar foto</button>
+      </div>
+      <button type="button" class="btn btn-save" id="rvSendBtn" style="width:100%" onclick="submitReview(true)">Enviar reseña</button>
+    </div>
+  </div>
+</div>
+<div class="rv-overlay" id="rvListOverlay" onclick="if(event.target===this)closeReviewsList()">
+  <div class="rv-sheet">
+    <div class="rv-head"><strong>Reseñas</strong><button type="button" class="rv-close" onclick="closeReviewsList()">✕</button></div>
+    <div class="rv-prodname" id="rvListProduct"></div>
+    <div id="rvListBody"></div>
+    <button type="button" class="btn btn-save" style="width:100%;margin-top:1rem" onclick="openReviewForm(_rvListPid,0)">⭐ Calificar este producto</button>
+  </div>
+</div>
+<div class="rv-overlay" id="rvPhotoOverlay" onclick="this.classList.remove('open')" style="align-items:center">
+  <img id="rvPhotoBig" alt="" style="max-width:94%;max-height:90vh;border-radius:12px;background:#fff">
+</div>
+<script>
+// ═══ RESEÑAS DE PRODUCTOS ═══
+let REVIEWS = {};
+let _rvPid = null, _rvListPid = null, _rvStars = 0, _rvPhotoData = null, _rvSending = false;
+
+function _rvKey(p) { return String(p._key || ("id" + p.id)); }
+function _rvEsc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+function _rvIsAdmin() { return (typeof loggedIn !== "undefined") && !!loggedIn; }
+
+function reviewStats(p) {
+  const list = Object.values(REVIEWS[_rvKey(p)] || {});
+  const dist = [0, 0, 0, 0, 0, 0];
+  let sum = 0;
+  list.forEach(function (x) {
+    const s = Math.max(1, Math.min(5, parseInt(x.stars, 10) || 0));
+    dist[s]++; sum += s;
+  });
+  return { count: list.length, avg: list.length ? sum / list.length : 0, dist: dist };
+}
+
+function ratingBlockHTML(p) {
+  const st = reviewStats(p);
+  const filled = Math.round(st.avg);
+  let stars = "";
+  for (let n = 1; n <= 5; n++) {
+    stars += "<button type='button' class='rv-star" + (n <= filled ? " on" : "") + "' title='Calificar con " + n + (n === 1 ? " estrella' " : " estrellas' ") +
+      "onclick='openReviewForm(" + p.id + "," + n + ",event)'>★</button>";
+  }
+  const label = st.count ? (st.avg.toFixed(1) + " (" + st.count + ")") : "Sin reseñas";
+  return "<div class='rv-block' data-pid='" + p.id + "'>" +
+    "<div class='rv-stars-row'><span class='rv-stars'>" + stars + "</span><span class='rv-avg'>" + label + "</span></div>" +
+    "<button type='button' class='rv-see-btn' onclick='openReviewsList(" + p.id + ",event)'>💬 Ver reseñas" + (st.count ? " (" + st.count + ")" : "") + "</button>" +
+    "</div>";
+}
+
+function updateRatingBlocks() {
+  document.querySelectorAll(".rv-block[data-pid]").forEach(function (el) {
+    const p = products.find(function (x) { return String(x.id) === el.getAttribute("data-pid"); });
+    if (p) el.outerHTML = ratingBlockHTML(p);
+  });
+  const lo = document.getElementById("rvListOverlay");
+  if (lo && lo.classList.contains("open")) renderReviewsList();
+}
+
+function renderPdReviewBlock() {
+  const box = document.getElementById("pdReviewBlock");
+  if (!box) return;
+  const p = products.find(function (x) { return x.id === _pdCurrentId; });
+  box.innerHTML = p ? ratingBlockHTML(p) : "";
+}
+
+// ── Formulario para calificar ──
+function renderBigStars() {
+  const box = document.getElementById("rvBigStars");
+  let h = "";
+  for (let n = 1; n <= 5; n++) {
+    h += "<button type='button' class='rv-star" + (n <= _rvStars ? " on" : "") + "' onclick='setReviewStars(" + n + ")'>★</button>";
+  }
+  box.innerHTML = h;
+  document.getElementById("rvChoiceBtns").style.display = (_rvStars > 0 && document.getElementById("rvCommentBox").style.display === "none") ? "flex" : "none";
+}
+function setReviewStars(n) { _rvStars = n; renderBigStars(); }
+
+function openReviewForm(pid, stars, ev) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  if (typeof _client === "undefined" || !_client) {
+    toast("Inicia sesión para dejar tu reseña", "error");
+    closeReviewsList();
+    showPage("client-login");
+    return;
+  }
+  const p = products.find(function (x) { return x.id === pid; });
+  if (!p) return;
+  _rvPid = pid; _rvStars = stars || 0; _rvPhotoData = null;
+  document.getElementById("rvFormProduct").textContent = p.name;
+  document.getElementById("rvComment").value = "";
+  document.getElementById("rvCommentBox").style.display = "none";
+  clearReviewPhoto();
+  const mine = (REVIEWS[_rvKey(p)] || {})[_client.uid];
+  if (mine && !_rvStars) _rvStars = parseInt(mine.stars, 10) || 0;
+  renderBigStars();
+  closeReviewsList();
+  document.getElementById("rvFormOverlay").classList.add("open");
+}
+function closeReviewForm() { document.getElementById("rvFormOverlay").classList.remove("open"); }
+function showReviewComment() {
+  document.getElementById("rvCommentBox").style.display = "block";
+  document.getElementById("rvChoiceBtns").style.display = "none";
+}
+async function onReviewPhoto(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  try {
+    const data = await _prepareImageFile(file);
+    if (!data) return;
+    _rvPhotoData = data;
+    const prev = document.getElementById("rvPhotoPrev");
+    prev.src = data; prev.style.display = "block";
+    document.getElementById("rvPhotoDel").style.display = "inline-block";
+  } catch (e) { toast("No se pudo leer la foto", "error"); }
+}
+function clearReviewPhoto() {
+  _rvPhotoData = null;
+  const inp = document.getElementById("rvPhoto"); if (inp) inp.value = "";
+  const prev = document.getElementById("rvPhotoPrev"); if (prev) { prev.src = ""; prev.style.display = "none"; }
+  const del = document.getElementById("rvPhotoDel"); if (del) del.style.display = "none";
+}
+
+async function submitReview(withComment) {
+  if (_rvSending) return;
+  if (typeof _client === "undefined" || !_client) { toast("Inicia sesión para dejar tu reseña", "error"); return; }
+  if (!_rvStars) { toast("Selecciona las estrellas", "error"); return; }
+  const p = products.find(function (x) { return x.id === _rvPid; });
+  if (!p) return;
+  if (!(window._fb && window._fb.ready && window._fb.ready())) { toast("Sin conexión. Intenta de nuevo", "error"); return; }
+  _rvSending = true;
+  const btn = document.getElementById("rvSendBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Enviando..."; }
+  try {
+    let comment = "", photo = "";
+    if (withComment) {
+      comment = document.getElementById("rvComment").value.trim().slice(0, 500);
+      if (_rvPhotoData) photo = await uploadToImgBB(_rvPhotoData);
+    }
+    const parts = (_client.name || "Cliente").trim().split(/\s+/);
+    const shortName = parts[0] + (parts[1] ? " " + parts[1].charAt(0).toUpperCase() + "." : "");
+    const review = { uid: _client.uid, name: shortName, stars: _rvStars, comment: comment, photo: photo, ts: Date.now() };
+    await window._fb.addReview(_rvKey(p), _client.uid, review);
+    const k = _rvKey(p);
+    if (!REVIEWS[k]) REVIEWS[k] = {};
+    REVIEWS[k][_client.uid] = review;
+    updateRatingBlocks();
+    closeReviewForm();
+    toast("¡Gracias por tu reseña!", "success");
+  } catch (e) {
+    console.error("Reseña:", e);
+    toast("No se pudo guardar la reseña. Intenta de nuevo", "error");
+  }
+  _rvSending = false;
+  if (btn) { btn.disabled = false; btn.textContent = "Enviar reseña"; }
+}
+
+// ── Lista de reseñas ──
+function openReviewsList(pid, ev) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  _rvListPid = pid;
+  renderReviewsList();
+  document.getElementById("rvListOverlay").classList.add("open");
+}
+function closeReviewsList() { const o = document.getElementById("rvListOverlay"); if (o) o.classList.remove("open"); }
+
+function renderReviewsList() {
+  const p = products.find(function (x) { return x.id === _rvListPid; });
+  if (!p) return;
+  document.getElementById("rvListProduct").textContent = p.name;
+  const st = reviewStats(p);
+  const list = Object.entries(REVIEWS[_rvKey(p)] || {}).map(function (e) { return Object.assign({ _id: e[0] }, e[1]); })
+    .sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
+  let h = "";
+  if (!st.count) {
+    h = "<div class='rv-empty'>Todavía no hay reseñas. ¡Sé el primero en calificar!</div>";
+  } else {
+    let rows = "";
+    for (let n = 5; n >= 1; n--) {
+      const pct = Math.round((st.dist[n] / st.count) * 100);
+      rows += "<div class='rv-dist-row'><span>" + n + "★</span><div class='rv-dist-bar'><div class='rv-dist-fill' style='width:" + pct + "%'></div></div><span>" + st.dist[n] + "</span></div>";
+    }
+    h += "<div class='rv-summary'><div><div class='rv-summary-num'>" + st.avg.toFixed(1) + "</div>" +
+      "<div class='rv-summary-stars'>" + "★".repeat(Math.round(st.avg)) + "<span style='color:#cbd5e1'>" + "★".repeat(5 - Math.round(st.avg)) + "</span></div>" +
+      "<div class='rv-summary-count'>" + st.count + (st.count === 1 ? " reseña" : " reseñas") + "</div></div><div class='rv-dist'>" + rows + "</div></div>";
+    list.forEach(function (r) {
+      const s = Math.max(1, Math.min(5, parseInt(r.stars, 10) || 1));
+      const mine = (typeof _client !== "undefined" && _client && r.uid === _client.uid);
+      const date = r.ts ? new Date(r.ts).toLocaleDateString("es-GT") : "";
+      h += "<div class='rv-item'><div class='rv-item-top'><div><span class='rv-item-name'>" + _rvEsc(r.name || "Cliente") + "</span> <span class='rv-item-date'>" + date + "</span></div>" +
+        "<span class='rv-item-stars'>" + "★".repeat(s) + "<span style='color:#cbd5e1'>" + "★".repeat(5 - s) + "</span></span></div>" +
+        (r.comment ? "<div class='rv-item-text'>" + _rvEsc(r.comment) + "</div>" : "") +
+        (r.photo ? "<img class='rv-item-photo' src='" + _rvEsc(r.photo) + "' alt='Foto de la reseña' loading='lazy' onclick='openReviewPhoto(this.src)'>" : "") +
+        ((mine || _rvIsAdmin()) ? "<div><button type='button' class='rv-item-del' onclick=\"deleteReviewUI(" + p.id + ",'" + _rvEsc(r._id) + "')\">Eliminar" + (mine ? " mi reseña" : "") + "</button></div>" : "") +
+        "</div>";
+    });
+  }
+  document.getElementById("rvListBody").innerHTML = h;
+}
+function openReviewPhoto(src) {
+  document.getElementById("rvPhotoBig").src = src;
+  document.getElementById("rvPhotoOverlay").classList.add("open");
+}
+async function deleteReviewUI(pid, uid) {
+  const p = products.find(function (x) { return x.id === pid; });
+  if (!p || !confirm("¿Eliminar esta reseña?")) return;
+  try {
+    await window._fb.deleteReview(_rvKey(p), uid);
+    if (REVIEWS[_rvKey(p)]) delete REVIEWS[_rvKey(p)][uid];
+    updateRatingBlocks();
+    toast("Reseña eliminada", "success");
+  } catch (e) { console.error(e); toast("No se pudo eliminar", "error"); }
+}
+
+// ── Escuchar reseñas en tiempo real ──
+(function initReviewsWatch() {
+  let tries = 0;
+  const t = setInterval(function () {
+    tries++;
+    if (window._fb && window._fb.ready && window._fb.ready() && window._fb.watchReviews) {
+      clearInterval(t);
+      window._fb.watchReviews(function (data) { REVIEWS = data || {}; updateRatingBlocks(); });
+    } else if (tries > 60) { clearInterval(t); }
+  }, 500);
+})();
 </script>
 </body>
 </html>
