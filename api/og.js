@@ -1,9 +1,76 @@
-// api/og.js — Genera meta tags Open Graph por producto
+// api/og.js — Tienda No.2.
+// Cuando alguien comparte el enlace de un producto (/nombre-del-producto),
+// sirve la tienda con la vista previa (Open Graph) de ESE producto:
+// nombre, precio y foto. Si el producto no existe, usa los datos generales de la tienda.
+
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const STORE_NAME_DEFAULT = "DS Distribuidora San Francisco No.2";
+const DESC_DEFAULT = "Distribuidora de productos al por mayor";
+const LOGO_RESPALDO =
+  "https://res.cloudinary.com/dxxlersgi/image/upload/v1780665475/logodsdistribuidirasanfrancisco_cr6amy.png";
+// Base de datos REAL de la tienda No.2 (la misma de template.html)
+const DB = "https://dsdistribuidorasfc2-cc78f-default-rtdb.firebaseio.com";
+
+let templateCache = null;
+function loadTemplate() {
+  if (templateCache) return templateCache;
+  templateCache = fs.readFileSync(path.join(process.cwd(), "template.html"), "utf8");
+  return templateCache;
+}
+
+// Debe ser IGUAL a toSlug() de template.html
+function toSlug(str) {
+  return (str || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\./g, "-")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
+}
+
+function escapeHtml(str) {
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function getJson(url) {
+  try {
+    const r = await fetch(url);
+    if (r.ok) return await r.json();
+  } catch (err) {
+    console.error("Error consultando Firebase:", err);
+  }
+  return null;
+}
+
+// Primera imagen utilizable del producto
+function productImage(p, baseUrl, slug) {
+  const candidates = [];
+  if (p.imgUrl) candidates.push(p.imgUrl);
+  if (Array.isArray(p.images)) candidates.push(...p.images);
+  if (p.img) candidates.push(p.img);
+  const url = candidates.find(u => typeof u === "string" && /^https?:\/\//i.test(u));
+  if (url) return url;
+  // Si la foto está guardada como "data:" (base64), Facebook/WhatsApp no la aceptan:
+  // se sirve desde /api/og-image con una dirección normal.
+  const hasData = candidates.some(u => typeof u === "string" && u.startsWith("data:"));
+  if (hasData) return baseUrl + "/api/og-image?slug=" + encodeURIComponent(slug);
+  return "";
+}
 
 module.exports = async (req, res) => {
-  const slug = (req.query.slug || "").toLowerCase().trim();
+  let slug = String(req.query.slug || "").trim();
+  try { slug = decodeURIComponent(slug); } catch (e) {}
+  slug = slug.toLowerCase();
 
-  const STORE_NAME = "DS Distribuidora San Francisco No.2";
   const baseUrl = "https://" + req.headers.host;
 
   if (!slug) {
@@ -12,75 +79,70 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // ── Buscar producto en Firebase ─────────────────────────────────
-  const FIREBASE_URL = "https://dsdistribuidorasanfrancisco2-default-rtdb.firebaseio.com/products.json";
+  const [productsRaw, settings] = await Promise.all([
+    getJson(DB + "/products.json"),
+    getJson(DB + "/settings.json")
+  ]);
 
-  let ogTitle = STORE_NAME;
-  let ogDesc = STORE_NAME;
+  const storeName = (settings && settings.name) || STORE_NAME_DEFAULT;
+  const storeDesc = (settings && settings.desc) || DESC_DEFAULT;
+
+  const productos = productsRaw ? Object.values(productsRaw).filter(Boolean) : [];
+  const producto = productos.find(p =>
+    (p.slug && String(p.slug).toLowerCase() === slug) || toSlug(p.name) === slug
+  );
+
+  let ogTitle = storeName;
+  let ogDesc = storeDesc;
   let ogImage = "";
-  let ogPrice = "";
+  let ogType = "website";
 
-  try {
-    const fbRes = await fetch(FIREBASE_URL);
-    if (fbRes.ok) {
-      const data = await fbRes.json();
-      if (data) {
-        const productos = Object.values(data);
-        const producto = productos.find(p => {
-          if (p.slug && p.slug.toLowerCase() === slug) return true;
-          if (p.name) {
-            const generado = p.name.toLowerCase()
-              .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-              .replace(/[^a-z0-9]+/g, "-")
-              .replace(/^-|-$/g, "");
-            if (generado === slug) return true;
-          }
-          return false;
-        });
-
-        if (producto) {
-          ogTitle = producto.name || STORE_NAME;
-          ogPrice = producto.price || "";
-          const priceStr = ogPrice ? "Q" + ogPrice + " \u2014 " : "";
-          ogDesc = (producto.desc && producto.desc.trim()) ? producto.desc : (priceStr + STORE_NAME);
-          ogImage = producto.imgUrl || producto.img || "";
-        }
-      }
-    }
-  } catch (err) {
-    console.error("Error consultando Firebase:", err);
+  if (producto) {
+    ogType = "product";
+    const price = parseFloat(producto.price);
+    const priceStr = price > 0 ? "Q" + price.toFixed(2) : "";
+    ogTitle = producto.name + (priceStr ? " - " + priceStr : "");
+    const desc = (producto.desc || "").trim();
+    ogDesc = desc ? desc : (priceStr ? priceStr + " — " + storeName : storeName);
+    ogImage = productImage(producto, baseUrl, slug);
   }
 
-  const pageUrl = baseUrl + "/" + slug;
-  const redirectUrl = "/?producto_slug=" + encodeURIComponent(slug);
+  // Si el producto no tiene foto (o no existe), usa el logo de la tienda
+  if (!ogImage) {
+    const logo = (settings && settings.logo) || LOGO_RESPALDO;
+    if (logo.startsWith("data:")) {
+      const v = crypto.createHash("md5").update(logo).digest("hex").slice(0, 10);
+      ogImage = baseUrl + "/api/logo?v=" + v;
+    } else {
+      ogImage = logo;
+    }
+  }
 
-  const html = `<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${ogTitle}</title>
-<meta name="description" content="${ogDesc}">
-<meta http-equiv="refresh" content="0;url=${redirectUrl}">
-<meta property="og:type" content="product">
-<meta property="og:url" content="${pageUrl}">
-<meta property="og:title" content="${ogTitle}">
-<meta property="og:description" content="${ogDesc}">
-<meta property="og:site_name" content="${STORE_NAME}">
-${ogImage ? '<meta property="og:image" content="' + ogImage + '">\n<meta property="og:image:width" content="800">\n<meta property="og:image:height" content="800">' : ""}
-${ogPrice ? '<meta property="og:price:amount" content="' + ogPrice + '">\n<meta property="og:price:currency" content="GTQ">' : ""}
-<meta name="twitter:card" content="${ogImage ? "summary_large_image" : "summary"}">
-<meta name="twitter:title" content="${ogTitle}">
-<meta name="twitter:description" content="${ogDesc}">
-${ogImage ? '<meta name="twitter:image" content="' + ogImage + '">' : ""}
-</head>
-<body>
-<script>window.location.replace("${redirectUrl}");</script>
-<p>Cargando...</p>
-</body>
-</html>`;
+  const t = escapeHtml(ogTitle);
+  const d = escapeHtml(ogDesc.slice(0, 300));
+  const img = escapeHtml(ogImage);
+  const url = escapeHtml(baseUrl + "/" + encodeURIComponent(slug));
+
+  const ogBlock = `<!-- OG_META_START -->
+  <meta property="og:title" content="${t}">
+  <meta property="og:description" content="${d}">
+  <meta property="og:image" content="${img}">
+  <meta property="og:url" content="${url}">
+  <meta property="og:site_name" content="${escapeHtml(storeName)}">
+  <meta property="og:type" content="${ogType}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${t}">
+  <meta name="twitter:description" content="${d}">
+  <meta name="twitter:image" content="${img}">
+  <!-- OG_META_END -->`;
+
+  let finalHtml = loadTemplate().replace(
+    /<!-- OG_META_START -->[\s\S]*?<!-- OG_META_END -->/,
+    () => ogBlock
+  );
+  finalHtml = finalHtml.replace(/<title>[^<]*<\/title>/, () => `<title>${t}</title>`);
 
   res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.setHeader("Cache-Control", "s-maxage=3600");
-  res.status(200).send(html);
+  res.setHeader("Cache-Control", "public, s-maxage=300, stale-while-revalidate=600");
+  res.status(200).send(finalHtml);
 };

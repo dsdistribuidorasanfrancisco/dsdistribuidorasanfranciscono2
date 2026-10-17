@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/home.js": { "includeFiles": "template.html" },
+    "api/og.js": { "includeFiles": "template.html" }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/", "destination": "/api/home" },
+    { "source": "/:slug", "destination": "/api/og?slug=:slug" },
+    { "source": "/(.*)", "destination": "/api/home" }
+  ]
+}
