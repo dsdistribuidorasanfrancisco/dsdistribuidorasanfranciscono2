@@ -13,7 +13,8 @@ import { getDatabase, ref, onValue, set, push, update, remove, get }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged,
   createUserWithEmailAndPassword, sendPasswordResetEmail, updateProfile,
-  GoogleAuthProvider, FacebookAuthProvider, signInWithPopup }
+  GoogleAuthProvider, FacebookAuthProvider, signInWithPopup,
+  deleteUser, reauthenticateWithCredential, reauthenticateWithPopup, EmailAuthProvider }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const _DEFAULT_CONFIG = {
@@ -370,13 +371,27 @@ window._fb = {
 
 // ── Auth Social de CLIENTES ───────────────────────────────────
 window._clientAuth = {
-  register: async (email, password, name) => {
+  register: async (email, password, name, username) => {
     if (!_fbAuth) return { ok: false, err: "Firebase no disponible" };
     try {
+      if (username) {
+        const s = await get(ref(db, "usernames/" + username));
+        if (s.exists()) return { ok: false, err: "username-taken", code: "username-taken" };
+      }
       const cred = await createUserWithEmailAndPassword(_fbAuth, email, password);
       await updateProfile(cred.user, { displayName: name });
+      if (username) {
+        try {
+          await set(ref(db, "usernames/" + username), { uid: cred.user.uid, email: (email || "").toLowerCase() });
+        } catch (e) {
+          try { await deleteUser(cred.user); } catch (_) {}
+          return { ok: false, err: "username-error", code: "username-error" };
+        }
+      }
       return { ok: true, user: cred.user };
-    } catch(e) { return { ok: false, err: e.message }; }
+    } catch(e) {
+      return { ok: false, err: e.message };
+    }
   },
   loginEmail: async (email, password) => {
     if (!_fbAuth) return { ok: false, err: "Firebase no disponible" };
@@ -391,7 +406,7 @@ window._clientAuth = {
       const provider = new GoogleAuthProvider();
       const cred = await signInWithPopup(_fbAuth, provider);
       return { ok: true, user: cred.user };
-    } catch(e) { return { ok: false, err: e.message }; }
+    } catch(e) { return { ok: false, err: e.message || "", code: e.code || "" }; }
   },
   loginFacebook: async () => {
     if (!_fbAuth) return { ok: false, err: "Firebase no disponible" };
@@ -407,6 +422,82 @@ window._clientAuth = {
       await sendPasswordResetEmail(_fbAuth, email);
       return { ok: true };
     } catch(e) { return { ok: false, err: e.message }; }
+  },
+  // Login con nombre de usuario (busca el correo y pide la contraseña)
+  loginUsername: async (username, password) => {
+    if (!_fbAuth) return { ok: false, err: "Firebase no disponible" };
+    try {
+      const s = await get(ref(db, "usernames/" + username));
+      const rec = s.val();
+      if (!rec || !rec.email) return { ok: false, err: "not-found", code: "not-found" };
+      const cred = await signInWithEmailAndPassword(_fbAuth, rec.email, password);
+      return { ok: true, user: cred.user };
+    } catch(e) {
+      return { ok: false, err: e.message || "", code: e.code || "" };
+    }
+  },
+  resetPasswordByUsername: async (username) => {
+    if (!_fbAuth) return { ok: false };
+    try {
+      const s = await get(ref(db, "usernames/" + username));
+      const rec = s.val();
+      if (!rec || !rec.email) return { ok: false };
+      await sendPasswordResetEmail(_fbAuth, rec.email);
+      return { ok: true };
+    } catch(e) { return { ok: false }; }
+  },
+  hasPassword: () => {
+    const u = _fbAuth && _fbAuth.currentUser;
+    return !!(u && (u.providerData || []).some(p => p.providerId === "password"));
+  },
+  // Elegir nombre de usuario desde "Mi Perfil" (cuentas con contraseña)
+  claimUsername: async (username) => {
+    const user = _fbAuth && _fbAuth.currentUser;
+    if (!user) return { ok: false, code: "no-user" };
+    try {
+      const s = await get(ref(db, "usernames/" + username));
+      if (s.exists() && s.val().uid !== user.uid) return { ok: false, code: "taken" };
+      await set(ref(db, "usernames/" + username), { uid: user.uid, email: (user.email || "").toLowerCase() });
+      await update(ref(db, "customers/" + user.uid + "/profile"), { username });
+      return { ok: true };
+    } catch(e) { return { ok: false, code: "error", err: e.message || "" }; }
+  },
+  // Eliminar la cuenta del cliente definitivamente
+  deleteAccount: async (password) => {
+    const user = _fbAuth && _fbAuth.currentUser;
+    if (!user) return { ok: false, code: "no-user" };
+    if ((user.email || "").toLowerCase() === ADMIN_EMAIL.toLowerCase()) return { ok: false, code: "admin" };
+    try {
+      // 1) Confirmar que es el dueño de la cuenta
+      const providers = (user.providerData || []).map(p => p.providerId);
+      if (providers.includes("password")) {
+        if (!password) return { ok: false, code: "need-password" };
+        await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
+      } else if (providers.includes("google.com")) {
+        await reauthenticateWithPopup(user, new GoogleAuthProvider());
+      }
+      // 2) Borrar sus datos: perfil, direcciones, copia de pedidos, nombre de usuario y reseñas
+      const uid = user.uid;
+      const up = {};
+      up["customers/" + uid] = null;
+      try {
+        const pr = await get(ref(db, "customers/" + uid + "/profile/username"));
+        if (pr.val()) up["usernames/" + pr.val()] = null;
+      } catch (e) {}
+      try {
+        const rs = await get(ref(db, "reviews"));
+        const all = rs.val() || {};
+        Object.keys(all).forEach(pk => { if (all[pk] && all[pk][uid]) up["reviews/" + pk + "/" + uid] = null; });
+      } catch (e) {}
+      await update(ref(db), up);
+      // 3) Borrar la cuenta de acceso
+      await deleteUser(user);
+      window._currentClient = null;
+      localStorage.removeItem("lx_client_session");
+      return { ok: true };
+    } catch(e) {
+      return { ok: false, err: e.message || "", code: e.code || "" };
+    }
   },
   logout: async () => {
     try { await signOut(_fbAuth); } catch(e) {}
@@ -943,6 +1034,16 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 .social-login-btn.facebook-btn:hover { border-color: #1877F2; }
 /* FACEBOOK OCULTO hasta que Meta apruebe la verificación. Para mostrarlo de nuevo, borra la línea de abajo. */
 .social-login-btn.facebook-btn { display: none !important; }
+/* ═══ ACCESO DE CLIENTES: registrarse / iniciar sesión ═══ */
+.auth-view .social-login-btn { margin-bottom: 0.7rem; }
+.auth-switch { text-align: center; font-size: 1rem; margin: 1.1rem 0; color: var(--text-muted); }
+.auth-switch a { color: var(--accent); font-weight: 800; cursor: pointer; margin-left: 0.3rem; }
+.auth-title { font-weight: 800; font-size: 1.15rem; text-align: center; margin: 0.4rem 0 1rem; }
+.auth-back { display: block; text-align: center; margin-top: 0.8rem; color: var(--accent); font-weight: 700; cursor: pointer; font-size: 0.9rem; }
+.auth-hint { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.3rem; }
+.danger-zone { margin-top: 2rem; padding-top: 1.2rem; border-top: 1px dashed rgba(220,38,38,0.4); }
+.danger-zone h4 { color: #dc2626; margin: 0 0 0.4rem; }
+.danger-zone p { font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; margin: 0 0 0.8rem; }
 /* IMÁGENES DE PRODUCTO: las imágenes PNG transparentes se ven transparentes (sin fondo oscuro) */
 .product-img-wrap { background: transparent !important; }
 .product-img-wrap img { background: transparent !important; }
@@ -2298,6 +2399,7 @@ function showPage(name){
   document.querySelectorAll(".page").forEach(p=>p.classList.remove("active"));
   const pg=document.getElementById("page-"+name); if(!pg)return;
   pg.classList.add("active");
+  if(name==="client-login" && typeof showAuthView==="function") showAuthView("home");
   document.querySelectorAll(".nav-btn").forEach(b=>b.classList.remove("active"));
   const navMap={"shop":0,"cart":1,"track":2};
   if(navMap[name]!==undefined) document.querySelectorAll(".nav-btn")[navMap[name]]?.classList.add("active");
@@ -4338,31 +4440,66 @@ function downloadAldeaTemplate(){
         <h2>Mi Cuenta</h2>
         <p>Accede a tus pedidos y direcciones guardadas</p>
       </div>
-      <button class="social-login-btn google-btn" onclick="clientLoginGoogle()">
-        <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-        Continuar con Google
-      </button>
-      <button class="social-login-btn facebook-btn" onclick="clientLoginFacebook()">
-        <svg viewBox="0 0 24 24"><path fill="#1877F2" d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>
-        Continuar con Facebook
-      </button>
-      <div class="client-divider">o continúa con tu correo</div>
-      <div class="client-tabs">
-        <button class="client-tab active" id="clientTabLogin" onclick="switchClientTab('login')">Iniciar Sesión</button>
-        <button class="client-tab" id="clientTabRegister" onclick="switchClientTab('register')">Crear Cuenta</button>
-      </div>
       <div id="clientErrorBox" class="client-error"></div>
-      <div id="clientFormLogin">
+
+      <!-- Inicio: dos opciones -->
+      <div id="authView-home" class="auth-view">
+        <div class="auth-switch">¿No tienes una cuenta?<a onclick="showAuthView('register')">Registrarse</a></div>
+        <div class="auth-switch">¿Ya tienes cuenta?<a onclick="showAuthView('login')">Iniciar sesión</a></div>
+      </div>
+
+      <!-- Registrarse: 2 opciones -->
+      <div id="authView-register" class="auth-view" style="display:none">
+        <div class="auth-title">Registrarse</div>
+        <button class="social-login-btn" onclick="showAuthView('reg-email')">✉️ Continuar con correo electrónico</button>
+        <button class="social-login-btn google-btn" onclick="clientLoginGoogle()">
+          <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Continuar con Google
+        </button>
+        <a class="auth-back" onclick="showAuthView('home')">← Volver</a>
+      </div>
+
+      <!-- Registrarse con correo -->
+      <div id="authView-reg-email" class="auth-view" style="display:none">
+        <div class="auth-title">Crear cuenta con correo</div>
+        <div class="form-group"><label>Nombre completo</label><input type="text" id="clientRegName" placeholder="Tu nombre"></div>
+        <div class="form-group"><label>Nombre de usuario</label><input type="text" id="clientRegUser" placeholder="ej: juan_perez" autocapitalize="none" autocomplete="username"><div class="auth-hint">Con este nombre podrás iniciar sesión después. 3 a 20 letras, números, guion o guion bajo.</div></div>
+        <div class="form-group"><label>Correo electrónico</label><input type="email" id="clientRegEmail" placeholder="tu@correo.com"></div>
+        <div class="form-group"><label>Contraseña</label><input type="password" id="clientRegPass" placeholder="Mínimo 6 caracteres"></div>
+        <button class="btn btn-primary" style="width:100%" onclick="clientRegister_do()">Crear Cuenta</button>
+        <a class="auth-back" onclick="showAuthView('register')">← Volver</a>
+      </div>
+
+      <!-- Iniciar sesión: 3 opciones -->
+      <div id="authView-login" class="auth-view" style="display:none">
+        <div class="auth-title">Iniciar sesión</div>
+        <button class="social-login-btn" onclick="showAuthView('login-user')">👤 Continuar con nombre de usuario</button>
+        <button class="social-login-btn" onclick="showAuthView('login-email')">✉️ Continuar con correo electrónico</button>
+        <button class="social-login-btn google-btn" onclick="clientLoginGoogle()">
+          <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+          Continuar con Google
+        </button>
+        <a class="auth-back" onclick="showAuthView('home')">← Volver</a>
+      </div>
+
+      <!-- Iniciar sesión con nombre de usuario -->
+      <div id="authView-login-user" class="auth-view" style="display:none">
+        <div class="auth-title">Iniciar sesión con tu nombre de usuario</div>
+        <div class="form-group"><label>Nombre de usuario</label><input type="text" id="clientLoginUser" placeholder="tu nombre de usuario" autocapitalize="none" autocomplete="username" onkeydown="if(event.key==='Enter')clientLoginUser_do()"></div>
+        <div class="form-group"><label>Contraseña</label><input type="password" id="clientLoginUserPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')clientLoginUser_do()"></div>
+        <button class="btn btn-primary" style="width:100%;margin-bottom:0.8rem" onclick="clientLoginUser_do()">Ingresar</button>
+        <button class="btn btn-ghost" style="width:100%;font-size:0.88rem" onclick="clientForgotPassUser()">¿Olvidaste tu contraseña?</button>
+        <a class="auth-back" onclick="showAuthView('login')">← Volver</a>
+      </div>
+
+      <!-- Iniciar sesión con correo -->
+      <div id="authView-login-email" class="auth-view" style="display:none">
+        <div class="auth-title">Iniciar sesión con tu correo</div>
         <div class="form-group"><label>Correo electrónico</label><input type="email" id="clientLoginEmail" placeholder="tu@correo.com" onkeydown="if(event.key==='Enter')clientLoginEmail_do()"></div>
         <div class="form-group"><label>Contraseña</label><input type="password" id="clientLoginPass" placeholder="••••••••" onkeydown="if(event.key==='Enter')clientLoginEmail_do()"></div>
         <button class="btn btn-primary" style="width:100%;margin-bottom:0.8rem" onclick="clientLoginEmail_do()">Ingresar</button>
         <button class="btn btn-ghost" style="width:100%;font-size:0.88rem" onclick="clientForgotPass()">¿Olvidaste tu contraseña?</button>
-      </div>
-      <div id="clientFormRegister" style="display:none">
-        <div class="form-group"><label>Nombre completo</label><input type="text" id="clientRegName" placeholder="Tu nombre"></div>
-        <div class="form-group"><label>Correo electrónico</label><input type="email" id="clientRegEmail" placeholder="tu@correo.com"></div>
-        <div class="form-group"><label>Contraseña</label><input type="password" id="clientRegPass" placeholder="Mínimo 6 caracteres"></div>
-        <button class="btn btn-primary" style="width:100%" onclick="clientRegister_do()">Crear Cuenta</button>
+        <a class="auth-back" onclick="showAuthView('login')">← Volver</a>
       </div>
     </div>
   </div>
@@ -4420,8 +4557,14 @@ function downloadAldeaTemplate(){
         <h4>Información Personal</h4>
         <div class="form-group"><label>Nombre</label><input type="text" id="profileName" placeholder="Tu nombre"></div>
         <div class="form-group"><label>Correo</label><input type="email" id="profileEmail" placeholder="" readonly style="background:var(--bg);color:var(--text-muted)"></div>
+        <div class="form-group" id="profileUserBox" style="display:none"><label>Nombre de usuario</label><input type="text" id="profileUsername" placeholder="ej: juan_perez" autocapitalize="none"><button type="button" class="btn btn-ghost" id="profileUserBtn" style="margin-top:0.5rem;font-size:0.85rem" onclick="saveClientUsername()">Guardar nombre de usuario</button><div class="auth-hint">Con este nombre podrás iniciar sesión. Una vez guardado no se puede cambiar.</div></div>
         <div class="form-group"><label>Teléfono</label><input type="text" id="profilePhone" placeholder="502 XXXX XXXX"></div>
         <button class="btn btn-save" onclick="saveClientProfile()">Guardar Cambios</button>
+        <div class="danger-zone">
+          <h4>Eliminar mi cuenta</h4>
+          <p>Se borrarán tu cuenta, tus direcciones guardadas y tus reseñas. Tus pedidos ya realizados quedan registrados en la tienda. Si más adelante quieres volver, podrás registrarte o iniciar sesión de nuevo.</p>
+          <button type="button" class="btn" style="background:#dc2626;color:#fff" onclick="clientDeleteAccount()">🗑 Eliminar mi cuenta definitivamente</button>
+        </div>
       </div>
     </div>
   </div>
@@ -4575,12 +4718,44 @@ function updateClientNavbar() {
   }
 }
 
-function switchClientTab(tab) {
-  document.getElementById("clientTabLogin").classList.toggle("active", tab==="login");
-  document.getElementById("clientTabRegister").classList.toggle("active", tab==="register");
-  document.getElementById("clientFormLogin").style.display = tab==="login" ? "" : "none";
-  document.getElementById("clientFormRegister").style.display = tab==="register" ? "" : "none";
+function showAuthView(v) {
+  document.querySelectorAll("#page-client-login .auth-view").forEach(function (el) {
+    el.style.display = (el.id === "authView-" + v) ? "" : "none";
+  });
   setClientError("");
+}
+function switchClientTab(tab) { showAuthView(tab === "register" ? "reg-email" : "login-email"); }
+function _normUser(s) { return String(s || "").trim().toLowerCase().replace(/^@/, ""); }
+function _validUser(u) { return /^[a-z0-9_-]{3,20}$/.test(u); }
+
+function _afterClientLogin(user) {
+  _client = { uid: user.uid, name: user.displayName || "", email: user.email, photo: user.photoURL || "" };
+  localStorage.setItem("lx_client_session", JSON.stringify(_client));
+  updateClientNavbar();
+  showPage("client-dashboard");
+  loadClientDashboard();
+}
+
+// ── Login con nombre de usuario ────────────────────────────────
+async function clientLoginUser_do() {
+  const u = _normUser(document.getElementById("clientLoginUser").value);
+  const pass = document.getElementById("clientLoginUserPass").value;
+  if (!u || !pass) { setClientError("Ingresa tu nombre de usuario y contraseña."); return; }
+  if (!_validUser(u)) { setClientError("Nombre de usuario o contraseña incorrectos."); return; }
+  setClientError("");
+  const btn = event && event.target;
+  if (btn) btn.textContent = "Ingresando...";
+  const res = await window._clientAuth.loginUsername(u, pass);
+  if (btn) btn.textContent = "Ingresar";
+  if (res.ok) _afterClientLogin(res.user);
+  else setClientError("Nombre de usuario o contraseña incorrectos.");
+}
+async function clientForgotPassUser() {
+  const u = _normUser(document.getElementById("clientLoginUser").value);
+  if (!u || !_validUser(u)) { setClientError("Escribe tu nombre de usuario primero."); return; }
+  const res = await window._clientAuth.resetPasswordByUsername(u);
+  if (res.ok) { setClientError(""); toast("Te enviamos un correo para restablecer tu contraseña.", "success"); }
+  else setClientError("No se pudo enviar el correo. Revisa tu nombre de usuario.");
 }
 
 function setClientError(msg) {
@@ -4609,22 +4784,34 @@ async function clientLoginEmail_do() {
 
 async function clientRegister_do() {
   const name  = document.getElementById("clientRegName").value.trim();
+  const username = _normUser(document.getElementById("clientRegUser").value);
   const email = document.getElementById("clientRegEmail").value.trim();
   const pass  = document.getElementById("clientRegPass").value;
   if (!name)  { setClientError("Ingresa tu nombre."); return; }
+  if (!_validUser(username)) { setClientError("El nombre de usuario debe tener de 3 a 20 letras, números, guion o guion bajo (sin espacios)."); return; }
   if (!email) { setClientError("Ingresa tu correo."); return; }
   if (pass.length < 6) { setClientError("La contraseña debe tener al menos 6 caracteres."); return; }
   setClientError("");
-  const res = await window._clientAuth.register(email, pass, name);
+  const res = await window._clientAuth.register(email, pass, name, username);
   if (res.ok) {
     _client = { uid: res.user.uid, name, email, photo: "" };
     localStorage.setItem("lx_client_session", JSON.stringify(_client));
-    if (window._fb && window._fb.ready()) window._fb.saveCustomerProfile(res.user.uid, { name, email, phone: "" });
-    updateClientNavbar(); toast("¡Bienvenido, " + name + "!", "success");
-    showPage("client-dashboard"); loadClientDashboard();
+    if (window._fb && window._fb.ready()) {
+      window._fb.saveCustomerProfile(res.user.uid, { name, email, phone: "", username });
+    }
+    updateClientNavbar();
+    toast("¡Bienvenido, " + name + "!", "success");
+    showPage("client-dashboard");
+    loadClientDashboard();
   } else {
-    const msgs = {"auth/email-already-in-use":"Ya existe una cuenta con ese correo. Inicia sesión.","auth/invalid-email":"Correo no válido.","auth/weak-password":"La contraseña es muy débil."};
-    const code = res.err.match(/\(([^)]+)\)/)?.[1] || "";
+    const msgs = {
+      "auth/email-already-in-use": "Ya existe una cuenta con ese correo. Inicia sesión.",
+      "auth/invalid-email": "Correo no válido.",
+      "auth/weak-password": "La contraseña es muy débil.",
+      "username-taken": "Ese nombre de usuario ya está en uso. Elige otro.",
+      "username-error": "No se pudo guardar el nombre de usuario. Intenta con otro."
+    };
+    const code = res.code || ((res.err || "").match(/\(([^)]+)\)/)?.[1]) || "";
     setClientError(msgs[code] || "Error al crear la cuenta.");
   }
 }
@@ -4638,7 +4825,15 @@ async function clientLoginGoogle() {
     localStorage.setItem("lx_client_session", JSON.stringify(_client));
     if (window._fb && window._fb.ready()) window._fb.saveCustomerProfile(res.user.uid, { name: _client.name, email: _client.email, phone: "" });
     updateClientNavbar(); showPage("client-dashboard"); loadClientDashboard();
-  } else { if (!res.err.includes("popup-closed")) setClientError("No se pudo iniciar sesión con Google."); }
+  } else if (!res.err.includes("popup-closed")) {
+    const c = res.code || "";
+    let m = "No se pudo iniciar sesión con Google.";
+    if (c === "auth/unauthorized-domain") m = "Este sitio no está autorizado para iniciar sesión con Google. El administrador debe agregarlo en Firebase → Authentication → Configuración → Dominios autorizados.";
+    else if (c === "auth/operation-not-allowed") m = "El inicio de sesión con Google no está activado. El administrador debe activarlo en Firebase → Authentication → Método de acceso.";
+    else if (c === "auth/popup-blocked") m = "Tu navegador bloqueó la ventana de Google. Permite las ventanas emergentes e intenta de nuevo.";
+    else if (c === "auth/network-request-failed") m = "Sin conexión. Revisa tu internet e intenta de nuevo.";
+    setClientError(m + (c ? " (" + c + ")" : ""));
+  }
 }
 
 async function clientLoginFacebook() {
@@ -4682,6 +4877,7 @@ function loadClientDashboard() {
   const pEmail = document.getElementById("profileEmail");
   if (pName)  pName.value  = _client.name || "";
   if (pEmail) pEmail.value = _client.email || "";
+  if (typeof loadClientUsername === "function") loadClientUsername();
   loadClientOrders();
   loadClientAddresses();
   loadClientDeptSelect();
@@ -4843,6 +5039,58 @@ async function deleteClientAddress(key) {
   loadClientAddresses();
 }
 
+async function loadClientUsername() {
+  const box = document.getElementById("profileUserBox"); if (!box) return;
+  const can = window._clientAuth && window._clientAuth.hasPassword && window._clientAuth.hasPassword();
+  box.style.display = can ? "" : "none";
+  if (!can) return;
+  try {
+    const p = await window._fb.getCustomerProfile(_client.uid);
+    const inp = document.getElementById("profileUsername"), btn = document.getElementById("profileUserBtn");
+    if (p && p.username) { inp.value = p.username; inp.readOnly = true; inp.style.background = "var(--bg)"; btn.style.display = "none"; }
+    else { inp.value = ""; inp.readOnly = false; inp.style.background = ""; btn.style.display = ""; }
+  } catch (e) {}
+}
+async function saveClientUsername() {
+  if (!_client) return;
+  const u = _normUser(document.getElementById("profileUsername").value);
+  if (!_validUser(u)) { toast("Usa de 3 a 20 letras, números, guion o guion bajo (sin espacios)", "error"); return; }
+  const res = await window._clientAuth.claimUsername(u);
+  if (res.ok) { toast("Nombre de usuario guardado ✓", "success"); loadClientUsername(); }
+  else if (res.code === "taken") toast("Ese nombre de usuario ya está en uso", "error");
+  else toast("No se pudo guardar el nombre de usuario", "error");
+}
+async function clientDeleteAccount() {
+  if (!_client) return;
+  if (!confirm("¿Eliminar tu cuenta definitivamente?\n\nSe borrarán tu cuenta, tus direcciones guardadas y tus reseñas.\nNo se puede deshacer.")) return;
+  const typed = prompt("Para confirmar, escribe ELIMINAR");
+  if (!typed || typed.trim().toUpperCase() !== "ELIMINAR") { toast("No se eliminó tu cuenta", "error"); return; }
+  let password = "";
+  if (window._clientAuth.hasPassword && window._clientAuth.hasPassword()) {
+    password = prompt("Escribe tu contraseña para confirmar");
+    if (!password) { toast("No se eliminó tu cuenta", "error"); return; }
+  }
+  toast("Eliminando tu cuenta...", "success");
+  const res = await window._clientAuth.deleteAccount(password);
+  if (res.ok) {
+    _client = null;
+    localStorage.removeItem("lx_client_session");
+    localStorage.removeItem("lx_my_orders");
+    updateClientNavbar();
+    showPage("shop");
+    toast("Tu cuenta fue eliminada. Cuando quieras puedes registrarte o iniciar sesión de nuevo.", "success");
+    return;
+  }
+  const msgs = {
+    "auth/wrong-password": "Contraseña incorrecta.",
+    "auth/invalid-credential": "Contraseña incorrecta.",
+    "auth/popup-closed-by-user": "Cancelaste la confirmación con Google.",
+    "auth/requires-recent-login": "Por seguridad, cierra sesión, vuelve a entrar e inténtalo de nuevo.",
+    "no-user": "Vuelve a iniciar sesión e inténtalo de nuevo.",
+    "admin": "Esta cuenta no se puede eliminar aquí."
+  };
+  toast(msgs[res.code] || "No se pudo eliminar la cuenta. Intenta de nuevo.", "error");
+}
 async function saveClientProfile() {
   if (!_client) return;
   const name  = document.getElementById("profileName").value.trim();
