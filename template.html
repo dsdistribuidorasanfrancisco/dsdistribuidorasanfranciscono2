@@ -194,6 +194,7 @@ window._fb = {
         id: order.id, date: order.date, status: order.status, total: order.total,
         pickupStore: order.pickupStore || null,
         customer: { dept: (order.customer && order.customer.dept) || "", mun: (order.customer && order.customer.mun) || "" },
+        payKey: (order.payment && order.payment.key) || "",
         trackingGuia: "", trackingNote: "", trackingUrl: ""
       });
     } catch (e) { console.warn("tracking:", e.message); }
@@ -202,6 +203,35 @@ window._fb = {
       try { await set(ref(db, "customers/" + order.customerUid + "/orders/" + newRef.key), data); } catch (e) { console.warn("cliente:", e.message); }
     }
     return newRef.key;
+  },
+  // Eliminar/cancelar un pedido: devuelve los productos al inventario y el número de pedido
+  cancelOrder: async (o) => {
+    if (!fbReady || !o || !o._key) throw new Error("Pedido no encontrado");
+    const up = {};
+    up["orders/" + o._key] = null;
+    up["tracking/" + o.id] = null;
+    if (o.customerUid) up["customers/" + o.customerUid + "/orders/" + o._key] = null;
+    if (o.restore !== false) {
+      const back = {};
+      (o.items || []).forEach(it => { if (it.pkey) back[it.pkey] = (back[it.pkey] || 0) + (parseInt(it.qty, 10) || 0); });
+      for (const [pkey, qty] of Object.entries(back)) {
+        const s = await get(ref(db, "products/" + pkey + "/stock"));
+        const cur = s.val();
+        if (typeof cur === "number") up["products/" + pkey + "/stock"] = cur + qty;
+      }
+    }
+    const cs = await get(ref(db, "meta/orderCounter"));
+    if (typeof cs.val() === "number" && cs.val() === o.id) up["meta/orderCounter"] = o.id - 1;
+    await update(ref(db), up);
+  },
+  // Comprobante de pago (foto de la boleta o de la transferencia)
+  saveVoucher: async (orderKey, url, customerUid) => {
+    if (!fbReady || !orderKey) throw new Error("Pedido no encontrado");
+    const up = {};
+    up["orders/" + orderKey + "/comprobante"] = url;
+    up["orders/" + orderKey + "/comprobanteDate"] = Date.now();
+    if (customerUid) up["customers/" + customerUid + "/orders/" + orderKey + "/comprobante"] = url;
+    await update(ref(db), up);
   },
   // Número de pedido consecutivo (cada cliente toma el siguiente número)
   reserveOrderId: async () => {
@@ -239,6 +269,7 @@ window._fb = {
       up["tracking/" + o.id] = {
         id: o.id, date: o.date, status: o.status, total: o.total, pickupStore: o.pickupStore || null,
         customer: { dept: (o.customer && o.customer.dept) || "", mun: (o.customer && o.customer.mun) || "" },
+        payKey: (o.payment && o.payment.key) || "",
         trackingGuia: o.trackingGuia || "", trackingNote: o.trackingNote || "", trackingUrl: o.trackingUrl || ""
       };
       if (o.customerUid) { const { _key, ...d } = o; up["customers/" + o.customerUid + "/orders/" + o._key] = d; }
@@ -1352,6 +1383,21 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
             <label>Datos bancarios (banco, cuenta, nombre, CUI…)</label>
             <textarea id="pmTransDesc" rows="4" placeholder="Ej: Banco Industrial&#10;Cuenta: 123-456789-0&#10;A nombre de: Distribuidora San Francisco&#10;CUI: 1234567890101"></textarea>
           </div>
+          <div class="form-group" style="margin:1rem 0 0">
+            <label>📱 Código QR para transferir (imagen)</label>
+            <div id="pmTransQrPreview" style="margin:0.4rem 0"></div>
+            <input type="hidden" id="pmTransQr">
+            <div style="display:flex;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.6rem">
+              <label class="btn btn-ghost" for="pmTransQrFile" style="cursor:pointer">📷 Subir imagen del QR</label>
+              <input type="file" id="pmTransQrFile" accept="image/*" style="display:none" onchange="onTransQrFile(this)">
+              <button type="button" class="btn btn-ghost" onclick="clearTransQr()">Quitar QR</button>
+            </div>
+            <input type="text" id="pmTransQrUrl" placeholder="…o pega aquí el enlace (https://) de la imagen del QR" oninput="document.getElementById('pmTransQr').value=this.value.trim();renderTransQrPreview()">
+          </div>
+          <div class="form-group" style="margin:1rem 0 0">
+            <label>🔗 Enlace del banco para transferir (opcional)</label>
+            <input type="text" id="pmTransLink" placeholder="https://...">
+          </div>
         </div>
         <!-- Depósito -->
         <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:1.2rem">
@@ -1720,6 +1766,7 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
         <p style="font-family:'Plus Jakarta Sans';font-size:3rem;font-weight:800;color:var(--accent);letter-spacing:1px" id="successOrderId">#000</p>
         <p id="successPaymentMethod" style="margin-top:0.5rem;font-size:1rem;font-weight:700;color:var(--text-muted)"></p>
       </div>
+      <div id="successPayActions" style="margin-bottom:1rem"></div>
       <button class="btn-save" style="width:100%;margin-bottom:1rem; padding:1.2rem; font-size:1.05rem;" onclick="goTrackOrder()">Rastrear mi Pedido</button>
       <button class="btn-cancel" style="width:100%; padding:1.2rem; font-size:1.05rem;" onclick="closeSuccess()">Seguir Comprando</button>
     </div>
@@ -2657,7 +2704,7 @@ async function placeOrder(){
     pickupStore=stores.find(s=>s.id===storeId)||stores[0];
   }
   const{subtotal,shipping,total}=updateCheckoutTotal();
-  const items=cart.map(ci=>{const p=products.find(x=>x.id===ci.id);const pu=p?getPrecioCarritoItem(p,ci.qty).precio:0;return p?{id:p.id,name:p.name,price:pu,qty:ci.qty}:null;}).filter(Boolean);
+  const items=cart.map(ci=>{const p=products.find(x=>x.id===ci.id);const pu=p?getPrecioCarritoItem(p,ci.qty).precio:0;return p?{id:p.id,sku:p.sku||"",name:p.name,price:pu,qty:ci.qty}:null;}).filter(Boolean);
   window._placingOrder=true; setTimeout(()=>{window._placingOrder=false;},4000);
   const _oid=await _reserveOrderId();
   items.forEach(it=>{const p=products.find(x=>x.id===it.id);if(p)p.stock=Math.max(0,p.stock-it.qty);});
@@ -2669,7 +2716,7 @@ async function placeOrder(){
   if(typeof _client!=="undefined" && _client) order.customerUid=_client.uid;
   orders.push(order);
   localStorage.setItem("lx_orders",JSON.stringify(orders));
-  if(window._fb && window._fb.ready()) window._fb.saveOrder(order).then(k=>{ if(k) order._key=k; }).catch(e=>console.warn("saveOrder:",e));
+  if(window._fb && window._fb.ready()) window._lastOrderKeyPromise=window._fb.saveOrder(order).then(k=>{ if(k){ order._key=k; rememberMyOrder(order,k); } return k; }).catch(e=>{ console.warn("saveOrder:",e); return null; });
   const wa=storeSettings.waNumber;
   if(wa){
     const tipoLabel=PRECIO_TIPOS[mayoreoTipo||"publico"]?.label||"Público";
@@ -2688,6 +2735,7 @@ async function placeOrder(){
   // Show payment method in success modal
   const payEl=document.getElementById("successPaymentMethod");
   if(payEl) payEl.textContent=selectedPayment.icon+" "+selectedPayment.label;
+  renderSuccessPayActions(order);
   document.getElementById("successModal").classList.add("open");
   renderShop();
 }
@@ -2749,7 +2797,7 @@ async function doTrack(){
         "<div><strong style='font-size:1.2rem;'>Pedido #"+o.id+"</strong><div style='font-size:0.9rem;color:var(--text-muted);margin-top:0.3rem'>"+date+"</div></div>"+
         "<span class='status-badge "+o.status.replace(/ /g,"")+"'>"+o.status+"</span>"+
       "</div>"+stepsHtml+
-      guiaBlock+notaBlock+
+      guiaBlock+notaBlock+trackOwnerBlock(o)+
       "<div style='margin-top:1.5rem;padding-top:1.2rem;border-top:1px dashed var(--border);font-size:1rem'>Total a pagar: <strong style='font-size:1.2rem;'>Q"+o.total.toFixed(2)+"</strong><br>"+
       (o.pickupStore?"<span style='font-size:0.88rem;color:var(--accent);font-weight:700'>🏪 Recoger en: "+o.pickupStore.nombre+" — "+o.pickupStore.direccion+"</span>":"<span style='font-size:0.85rem;color:var(--text-muted)'>Destino: "+o.customer.dept+", "+o.customer.mun+"</span>")+
       "</div>"+
@@ -3189,8 +3237,8 @@ function renderAdminOrders(){
       "</td>"+
       "<td><select style='border:1px solid var(--border);border-radius:6px;padding:0.4rem;cursor:pointer;font-size:0.85rem;background:var(--surface);font-weight:600' onchange='changeOrderStatus("+o.id+",this.value)'>"+
         STEPS.map(s=>"<option"+(o.status===s?" selected":"")+">"+s+"</option>").join("")+
-      "</select></td></tr>";
-  }).join()||"<tr><td colspan='8' style='text-align:center;color:var(--text-muted)'>Sin pedidos</td></tr>";
+      "</select></td></tr>"+adminOrderDetailRow(o);
+  }).join("")||"<tr><td colspan='8' style='text-align:center;color:var(--text-muted)'>Sin pedidos</td></tr>";
 }
 function changeOrderStatus(id,status){
   const o=orders.find(x=>x.id===id);
@@ -3520,6 +3568,8 @@ function applyPaymentMethodsAdmin(){
   if(si("pmCodDesc"))      si("pmCodDesc").value         = pm.cod?.desc||"";
   if(si("pmTransEnabled")) si("pmTransEnabled").checked  = pm.transfer?.enabled||false;
   if(si("pmTransDesc"))    si("pmTransDesc").value        = pm.transfer?.desc||"";
+  setTransferQrAdmin(pm.transfer?.qr||"");
+  if(si("pmTransLink"))    si("pmTransLink").value        = pm.transfer?.link||"";
   if(si("pmDepEnabled"))   si("pmDepEnabled").checked    = pm.deposit?.enabled||false;
   if(si("pmDepDesc"))      si("pmDepDesc").value          = pm.deposit?.desc||"";
   if(si("pmPickupEnabled"))si("pmPickupEnabled").checked = pm.pickup?.enabled||false;
@@ -3530,7 +3580,7 @@ function savePaymentMethods(){
   const si=id=>document.getElementById(id);
   storeSettings.paymentMethods={
     cod:     {enabled:si("pmCodEnabled")?.checked||false,   label:"Pago Contra Entrega",    icon:"🚚", desc:si("pmCodDesc")?.value.trim()||""},
-    transfer:{enabled:si("pmTransEnabled")?.checked||false, label:"Transferencia Bancaria",  icon:"🏦", desc:si("pmTransDesc")?.value.trim()||""},
+    transfer:{enabled:si("pmTransEnabled")?.checked||false, label:"Transferencia Bancaria",  icon:"🏦", desc:si("pmTransDesc")?.value.trim()||"", qr:(si("pmTransQr")?.value||"").trim(), link:(si("pmTransLink")?.value||"").trim()},
     deposit: {enabled:si("pmDepEnabled")?.checked||false,   label:"Depósito Bancario",       icon:"💵", desc:si("pmDepDesc")?.value.trim()||""},
     pickup:  {enabled:si("pmPickupEnabled")?.checked||false,label:"Recoge en Tienda",        icon:"🏪", desc:si("pmPickupDesc")?.value.trim()||""}
   };
@@ -4660,12 +4710,13 @@ async function loadClientOrders() {
     return;
   }
   const sorted = [...clientOrders].sort((a,b) => b.date - a.date);
+  sorted.forEach(o => { if (o._key) rememberMyOrder(o, o._key); });
   const statusColor = { "Pendiente":"var(--orange)","En Proceso":"var(--accent)","En Ruta":"#3b82f6","Entregado":"var(--green)","Cancelado":"var(--red)" };
   container.innerHTML = sorted.map(o => {
     const date = new Date(o.date).toLocaleDateString("es-GT",{year:"numeric",month:"short",day:"numeric"});
     const itemsText = (o.items||[]).slice(0,2).map(i => i.name + " x" + i.qty).join(", ") + ((o.items||[]).length > 2 ? ` y ${o.items.length-2} más` : "");
     const color = statusColor[o.status] || "var(--text-muted)";
-    return `<div class="client-order-card" onclick="clientTrackOrder(\'${o.id}\')"><div class="client-order-top"><div><div class="client-order-id">Pedido #${o.id}</div><div class="client-order-date">${date}</div></div><span class="status-badge ${(o.status||"").replace(/ /g,"")}" style="background:${color}20;color:${color};border:1px solid ${color}40">${o.status||"Pendiente"}</span></div><div class="client-order-items">${itemsText||"Sin detalles"}</div><div style="display:flex;justify-content:space-between;align-items:center"><div class="client-order-total">Q${(o.total||0).toFixed(2)}</div><span style="font-size:0.82rem;color:var(--accent);font-weight:600">Ver estado →</span></div></div>`;
+    return `<div class="client-order-card" onclick="clientTrackOrder(\'${o.id}\')"><div class="client-order-top"><div><div class="client-order-id">Pedido #${o.id}</div><div class="client-order-date">${date}</div></div><span class="status-badge ${(o.status||"").replace(/ /g,"")}" style="background:${color}20;color:${color};border:1px solid ${color}40">${o.status||"Pendiente"}</span></div><div class="client-order-items">${itemsText||"Sin detalles"}</div><div style="display:flex;justify-content:space-between;align-items:center"><div class="client-order-total">Q${(o.total||0).toFixed(2)}</div><span style="font-size:0.82rem;color:var(--accent);font-weight:600">Ver estado →</span></div>${clientOrderActions(o)}</div>`;
   }).join("");
 }
 
@@ -4826,6 +4877,247 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   });
+}
+</script>
+<style>
+/* ═══ PEDIDOS: cancelar, comprobante, contacto ═══ */
+.co-btn { background: #fff; border: 1px solid var(--border); border-radius: 100px; padding: 0.5rem 1rem; font-size: 0.82rem; font-weight: 700; cursor: pointer; font-family: inherit; color: var(--dark); }
+.co-btn.co-danger { color: #dc2626; border-color: rgba(220,38,38,0.35); }
+.client-order-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px dashed var(--border); }
+.pay-panel { background: var(--bg); border: 1px solid var(--border); border-radius: 14px; padding: 1rem; text-align: left; margin-bottom: 0.6rem; }
+.pay-panel-title { font-weight: 800; font-size: 1rem; margin-bottom: 0.3rem; }
+.pay-panel-hint { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 0.6rem; }
+.pay-panel-desc { font-size: 0.9rem; background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem; margin-bottom: 0.7rem; word-break: break-word; }
+.pay-qr { text-align: center; margin-bottom: 0.7rem; }
+.pay-qr img { max-width: 230px; width: 100%; border-radius: 12px; border: 1px solid var(--border); background: #fff; }
+.pay-qr a { display: block; font-size: 0.85rem; margin-top: 0.4rem; color: var(--accent); font-weight: 700; }
+.pay-qr small { display: block; color: var(--text-muted); margin-top: 0.2rem; }
+.pay-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; border: none; border-radius: 100px; padding: 0.7rem 1.1rem; font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; text-decoration: none; background: var(--accent); color: #fff; }
+.pay-btn.pay-alt { background: #fff; color: var(--dark); border: 1px solid var(--border); }
+.pay-btn.pay-bank { display: flex; margin-bottom: 0.7rem; background: #1d4ed8; }
+.pay-upload { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.pay-upload .pay-btn { flex: 1; min-width: 140px; }
+.pay-done { font-size: 0.88rem; font-weight: 700; color: #15803d; margin-bottom: 0.6rem; }
+.pay-done a { color: var(--accent); margin-left: 0.4rem; }
+.order-detail-row td { background: var(--bg); padding: 0.8rem 1rem !important; }
+.order-detail { text-align: left; font-size: 0.88rem; }
+.od-title { font-weight: 800; margin-bottom: 0.5rem; }
+.od-table-wrap { overflow-x: auto; }
+.od-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+.od-table th, .od-table td { padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.od-table td:nth-child(2) { white-space: normal; min-width: 160px; }
+.od-info { margin-top: 0.6rem; color: var(--text-muted); line-height: 1.5; }
+.od-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.8rem; }
+.od-btn { display: inline-flex; align-items: center; gap: 0.35rem; border: none; border-radius: 100px; padding: 0.55rem 1rem; font-size: 0.85rem; font-weight: 700; cursor: pointer; text-decoration: none; font-family: inherit; color: #fff; }
+.od-wa { background: #16a34a; } .od-mail { background: #2563eb; } .od-del { background: #dc2626; }
+.od-voucher img { width: 90px; height: 90px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); margin-top: 0.4rem; }
+</style>
+<input type="file" id="voucherInput" accept="image/*" style="display:none" onchange="onVoucherFile(this)">
+<input type="file" id="voucherInputCam" accept="image/*" capture="environment" style="display:none" onchange="onVoucherFile(this)">
+<script>
+// ═══ PEDIDOS: cancelar, comprobante de pago y contacto ═══
+function _ordEsc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+function _myOrdersLoad(){ try{ return JSON.parse(localStorage.getItem("lx_my_orders")||"{}"); }catch(e){ return {}; } }
+function _myOrdersSave(m){ try{ localStorage.setItem("lx_my_orders",JSON.stringify(m)); }catch(e){} }
+function rememberMyOrder(o,key){
+  if(!o||!o.id||!key) return;
+  const m=_myOrdersLoad(), prev=m[o.id]||{};
+  m[o.id]={ key:key, customerUid:o.customerUid||prev.customerUid||"", payKey:(o.payment&&o.payment.key)||prev.payKey||"",
+    voucher:o.comprobante||prev.voucher||"", items:(o.items||[]).map(function(i){return {id:i.id,qty:i.qty};}) };
+  _myOrdersSave(m);
+}
+function getMyOrder(id){ return _myOrdersLoad()[String(id)]||null; }
+function forgetMyOrder(id){ const m=_myOrdersLoad(); delete m[String(id)]; _myOrdersSave(m); }
+
+function _refreshOrderViews(){
+  try{ if(document.querySelector("#page-client-dashboard.active")) loadClientOrders(); }catch(e){}
+  try{ if(document.querySelector("#page-track.active")) doTrack(); }catch(e){}
+  try{ if(typeof renderShop==="function") renderShop(); }catch(e){}
+}
+
+// ── Cancelar pedido (cliente) ──
+async function cancelMyOrder(id,ev){
+  if(ev&&ev.stopPropagation) ev.stopPropagation();
+  let mo=getMyOrder(id);
+  if(!mo&&window._lastOrderKeyPromise){ try{ await window._lastOrderKeyPromise; }catch(e){} mo=getMyOrder(id); }
+  if(!mo||!mo.key){ toast("No encontramos este pedido en tu dispositivo. Contacta a la tienda.","error"); return; }
+  if(!confirm("¿Cancelar tu pedido #"+id+"?\nLos productos volverán al inventario.")) return;
+  const items=(mo.items||[]).map(function(i){ const p=products.find(function(x){return x.id===i.id;}); return {id:i.id,qty:i.qty,pkey:(p&&p._key)||null}; });
+  try{
+    await window._fb.cancelOrder({id:Number(id),_key:mo.key,customerUid:mo.customerUid||"",items:items,restore:true});
+  }catch(e){
+    console.warn("cancelOrder:",e);
+    toast("No se pudo cancelar. Si el pedido ya está en proceso, comunícate con la tienda.","error"); return;
+  }
+  items.forEach(function(it){ const p=products.find(function(x){return x.id===it.id;}); if(p) p.stock=(parseInt(p.stock,10)||0)+(parseInt(it.qty,10)||0); });
+  try{ localStorage.setItem("lx_products",JSON.stringify(products)); }catch(e){}
+  forgetMyOrder(id);
+  try{ orders=orders.filter(function(o){return o.id!==Number(id);}); localStorage.setItem("lx_orders",JSON.stringify(orders)); }catch(e){}
+  const sm=document.getElementById("successModal"); if(sm) sm.classList.remove("open");
+  toast("Pedido cancelado ✓","success");
+  _refreshOrderViews();
+}
+
+// ── Comprobante de pago (depósito / transferencia) ──
+let _voucherTargetId=null;
+function pickVoucher(id,camera,ev){
+  if(ev&&ev.stopPropagation) ev.stopPropagation();
+  _voucherTargetId=id;
+  const inp=document.getElementById(camera?"voucherInputCam":"voucherInput");
+  if(!inp) return; inp.value=""; inp.click();
+}
+async function _uploadFileToCloudinary(file){
+  let body=file;
+  if(file.size>8*1024*1024 && typeof _prepareImageFile==="function"){ body=await _prepareImageFile(file); }
+  const fd=new FormData(); fd.append("file",body); fd.append("upload_preset",CLOUDINARY_UPLOAD_PRESET);
+  const res=await fetch("https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/image/upload",{method:"POST",body:fd});
+  const json=await res.json();
+  if(json.error) throw new Error(json.error.message);
+  let u=json.secure_url||"";
+  if(/\.(heic|heif|tiff?)$/i.test(u)) u=u.replace(/\.(heic|heif|tiff?)$/i,".jpg");
+  return u;
+}
+async function onVoucherFile(input){
+  const file=input.files&&input.files[0]; if(!file) return;
+  const id=_voucherTargetId; if(!id) return;
+  let mo=getMyOrder(id), key=mo&&mo.key;
+  if(!key&&window._lastOrderKeyPromise){ try{ key=await window._lastOrderKeyPromise; }catch(e){} mo=getMyOrder(id); }
+  if(!key){ toast("Espera unos segundos e intenta de nuevo","error"); return; }
+  toast("Subiendo comprobante...","success");
+  try{
+    const url=await _uploadFileToCloudinary(file);
+    await window._fb.saveVoucher(key,url,(mo&&mo.customerUid)||"");
+    const m=_myOrdersLoad(); if(m[id]){ m[id].voucher=url; _myOrdersSave(m); }
+    toast("Comprobante enviado ✓","success");
+    const sm=document.getElementById("successModal");
+    if(sm&&sm.classList.contains("open")&&window._successOrderId===id) renderSuccessPayActions({id:id,payment:{key:(getMyOrder(id)||{}).payKey}});
+    _refreshOrderViews();
+  }catch(e){ console.warn("comprobante:",e); toast("No se pudo subir el comprobante. Intenta de nuevo","error"); }
+}
+function payPanelHTML(id,payKey){
+  if(payKey!=="transfer"&&payKey!=="deposit") return "";
+  const pm=getPaymentMethods(), m=pm[payKey]||{}, mo=getMyOrder(id)||{};
+  let h="<div class='pay-panel'><div class='pay-panel-title'>"+(m.icon||"")+" "+_ordEsc(m.label||"")+"</div>";
+  h+="<div class='pay-panel-hint'>"+(payKey==="deposit"?"Realiza tu depósito y sube aquí la foto de tu boleta.":"Realiza tu transferencia y sube aquí tu comprobante.")+"</div>";
+  if(m.desc) h+="<div class='pay-panel-desc'>"+_ordEsc(m.desc).replace(/\n/g,"<br>")+"</div>";
+  if(payKey==="transfer"){
+    if(m.qr) h+="<div class='pay-qr'><img src='"+_ordEsc(m.qr)+"' alt='Código QR para transferir'><a href='"+_ordEsc(m.qr)+"' target='_blank' rel='noopener'>Abrir QR en grande</a><small>Escanéalo con la app de tu banco o toma una captura de pantalla.</small></div>";
+    if(m.link) h+="<a class='pay-btn pay-bank' href='"+_ordEsc(m.link)+"' target='_blank' rel='noopener'>🏦 Ir al banco para transferir</a>";
+  }
+  if(mo.voucher) h+="<div class='pay-done'>✅ Comprobante enviado <a href='"+_ordEsc(mo.voucher)+"' target='_blank' rel='noopener'>Ver</a></div>";
+  h+="<div class='pay-upload'><button type='button' class='pay-btn' onclick='pickVoucher("+id+",true,event)'>📷 Tomar foto</button>"+
+     "<button type='button' class='pay-btn pay-alt' onclick='pickVoucher("+id+",false,event)'>🖼 "+(mo.voucher?"Cambiar comprobante":"Subir de galería")+"</button></div></div>";
+  return h;
+}
+function renderSuccessPayActions(order){
+  const box=document.getElementById("successPayActions"); if(!box) return;
+  window._successOrderId=order.id;
+  const payKey=order.payment&&order.payment.key;
+  box.innerHTML=payPanelHTML(order.id,payKey)+
+    "<button type='button' class='co-btn co-danger' style='width:100%;margin-top:0.4rem' onclick='cancelMyOrder("+order.id+",event)'>🗑 Me equivoqué, cancelar este pedido</button>";
+}
+function trackOwnerBlock(o){
+  if(typeof loggedIn!=="undefined"&&loggedIn) return "";
+  const mo=getMyOrder(o.id); if(!mo) return "";
+  const payKey=o.payKey||mo.payKey;
+  let h="";
+  if((payKey==="transfer"||payKey==="deposit")&&o.status!=="Cancelado") h+="<div style='margin-top:1.2rem'>"+payPanelHTML(o.id,payKey)+"</div>";
+  if(o.status==="Pendiente") h+="<button type='button' class='co-btn co-danger' style='margin-top:1rem' onclick='cancelMyOrder("+o.id+",event)'>🗑 Cancelar mi pedido</button>";
+  return h;
+}
+function clientOrderActions(o){
+  const st=o.status||"Pendiente", payKey=(o.payment&&o.payment.key)||"";
+  let b="";
+  if((payKey==="deposit"||payKey==="transfer")&&st!=="Cancelado"){
+    if(o.comprobante) b+="<span class='pay-done' style='margin:0'>✅ Comprobante enviado</span>";
+    b+="<button type='button' class='co-btn' onclick=\"pickVoucher("+o.id+",false,event)\">🧾 "+(o.comprobante?"Cambiar":"Subir")+" comprobante</button>";
+  }
+  if(st==="Pendiente") b+="<button type='button' class='co-btn co-danger' onclick=\"cancelMyOrder("+o.id+",event)\">🗑 Cancelar pedido</button>";
+  return b?"<div class='client-order-actions'>"+b+"</div>":"";
+}
+
+// ── Administrador: productos del pedido, WhatsApp, correo y eliminar ──
+function _waLink(contact,msg){
+  let d=String(contact||"").replace(/[^0-9]/g,"");
+  if(d.length===8) d="502"+d;
+  return "https://wa.me/"+d+"?text="+encodeURIComponent(msg);
+}
+function adminOrderMsg(o){
+  const c=o.customer||{};
+  let m="Hola "+(c.name||"")+", te escribimos de "+(storeSettings.name||"la tienda")+" sobre tu pedido #"+o.id+".\nEstado: "+o.status+".";
+  if(o.trackingNote) m+="\n"+o.trackingNote;
+  if(o.trackingGuia) m+="\nGuía: "+o.trackingGuia;
+  if(o.trackingUrl) m+="\nRastreo: "+o.trackingUrl;
+  m+="\nTotal: Q"+Number(o.total||0).toFixed(2);
+  return m;
+}
+function adminOrderDetailRow(o){
+  const c=o.customer||{}, contact=String(c.contact||"").trim();
+  const rows=(o.items||[]).map(function(it){
+    const p=products.find(function(x){return x.id===it.id;});
+    const sku=it.sku||(p&&p.sku)||"—";
+    const price=Number(it.price)||0;
+    return "<tr><td>"+_ordEsc(sku)+"</td><td>"+_ordEsc(it.name)+"</td><td style='text-align:center'><strong>"+it.qty+"</strong></td><td>Q"+price.toFixed(2)+"</td><td>Q"+(price*it.qty).toFixed(2)+"</td></tr>";
+  }).join("");
+  let info="";
+  if(c.address) info+="📍 "+_ordEsc(c.address)+"<br>";
+  if(c.notes) info+="📝 "+_ordEsc(c.notes)+"<br>";
+  info+="Subtotal Q"+Number(o.subtotal||0).toFixed(2)+" · Envío Q"+Number(o.shipping||0).toFixed(2)+" · <strong>Total Q"+Number(o.total||0).toFixed(2)+"</strong>";
+  const voucher=o.comprobante?"<div class='od-voucher'><strong>🧾 Comprobante de pago:</strong><br><a href='"+_ordEsc(o.comprobante)+"' target='_blank' rel='noopener'><img src='"+_ordEsc(o.comprobante)+"' alt='Comprobante'></a></div>"
+    :((o.payment&&(o.payment.key==="deposit"||o.payment.key==="transfer"))?"<div class='od-info'>🧾 Comprobante: aún no lo ha enviado</div>":"");
+  let acts="";
+  if(contact.indexOf("@")!==-1){
+    acts+="<a class='od-btn od-mail' href='mailto:"+_ordEsc(contact)+"?subject="+encodeURIComponent("Tu pedido #"+o.id+" - "+(storeSettings.name||""))+"&body="+encodeURIComponent(adminOrderMsg(o))+"'>✉️ Correo</a>";
+  } else if(contact.replace(/[^0-9]/g,"").length>=8){
+    acts+="<a class='od-btn od-wa' href='"+_ordEsc(_waLink(contact,adminOrderMsg(o)))+"' target='_blank' rel='noopener'>💬 WhatsApp</a>";
+  }
+  acts+="<button type='button' class='od-btn od-del' onclick='adminDeleteOrder("+o.id+")'>🗑 Eliminar pedido</button>";
+  return "<tr class='order-detail-row'><td colspan='8'><div class='order-detail'>"+
+    "<div class='od-title'>🛒 Productos del pedido #"+o.id+"</div>"+
+    "<div class='od-table-wrap'><table class='od-table'><thead><tr><th>Código</th><th>Producto</th><th>Cant.</th><th>Precio</th><th>Subtotal</th></tr></thead><tbody>"+(rows||"<tr><td colspan='5'>Sin detalle</td></tr>")+"</tbody></table></div>"+
+    "<div class='od-info'>"+info+"</div>"+voucher+"<div class='od-actions'>"+acts+"</div></div></td></tr>";
+}
+async function adminDeleteOrder(id){
+  const o=orders.find(function(x){return x.id===id;}); if(!o) return;
+  if(!confirm("¿Eliminar el pedido #"+id+"?\nSe devolverán los productos al inventario y, si es el último pedido, se libera su número.")) return;
+  let restore=true;
+  if(o.status==="Entregado") restore=confirm("Este pedido ya fue ENTREGADO.\n¿Devolver igual los productos al inventario?\n(Aceptar = devolver · Cancelar = no devolver)");
+  const items=(o.items||[]).map(function(i){ const p=products.find(function(x){return x.id===i.id;}); return {id:i.id,qty:i.qty,pkey:(p&&p._key)||null}; });
+  try{
+    await window._fb.cancelOrder({id:o.id,_key:o._key,customerUid:o.customerUid||"",items:items,restore:restore});
+  }catch(e){ console.warn("deleteOrder:",e); toast("No se pudo eliminar el pedido","error"); return; }
+  if(restore){
+    items.forEach(function(it){ const p=products.find(function(x){return x.id===it.id;}); if(p) p.stock=(parseInt(p.stock,10)||0)+(parseInt(it.qty,10)||0); });
+    try{ localStorage.setItem("lx_products",JSON.stringify(products)); }catch(e){}
+  }
+  orders=orders.filter(function(x){return x.id!==id;});
+  try{ localStorage.setItem("lx_orders",JSON.stringify(orders)); }catch(e){}
+  toast("Pedido eliminado ✓","success");
+  renderAdminOrders();
+  try{ if(typeof renderShop==="function") renderShop(); }catch(e){}
+}
+
+// ── Administrador: QR y enlace del banco para transferencias ──
+function renderTransQrPreview(){
+  const url=(document.getElementById("pmTransQr")||{}).value||"";
+  const box=document.getElementById("pmTransQrPreview"); if(!box) return;
+  box.innerHTML=url?"<img src='"+_ordEsc(url)+"' alt='QR' style='max-width:160px;border-radius:10px;border:1px solid var(--border);background:#fff'>":"<span style='font-size:0.85rem;color:var(--text-muted)'>Aún no hay QR</span>";
+}
+function setTransferQrAdmin(url){
+  const h=document.getElementById("pmTransQr"), u=document.getElementById("pmTransQrUrl");
+  if(h) h.value=url||""; if(u) u.value=url||"";
+  renderTransQrPreview();
+}
+function clearTransQr(){ setTransferQrAdmin(""); }
+async function onTransQrFile(input){
+  const file=input.files&&input.files[0]; if(!file) return;
+  toast("Subiendo QR...","success");
+  try{
+    const url=await _uploadFileToCloudinary(file);
+    setTransferQrAdmin(url);
+    toast("QR cargado. Toca «Guardar Métodos de Pago» para confirmar.","success");
+  }catch(e){ console.warn(e); toast("No se pudo subir el QR","error"); }
+  input.value="";
 }
 </script>
 <div class="rv-overlay" id="rvFormOverlay" onclick="if(event.target===this)closeReviewForm()">
