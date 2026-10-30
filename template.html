@@ -212,18 +212,20 @@ window._fb = {
     up["orders/" + o._key] = null;
     up["tracking/" + o.id] = null;
     if (o.customerUid) up["customers/" + o.customerUid + "/orders/" + o._key] = null;
+    const newStock = {};
     if (o.restore !== false) {
       const back = {};
       (o.items || []).forEach(it => { if (it.pkey) back[it.pkey] = (back[it.pkey] || 0) + (parseInt(it.qty, 10) || 0); });
       for (const [pkey, qty] of Object.entries(back)) {
         const s = await get(ref(db, "products/" + pkey + "/stock"));
         const cur = s.val();
-        if (typeof cur === "number") up["products/" + pkey + "/stock"] = cur + qty;
+        if (typeof cur === "number") { up["products/" + pkey + "/stock"] = cur + qty; newStock[pkey] = cur + qty; }
       }
     }
     const cs = await get(ref(db, "meta/orderCounter"));
     if (typeof cs.val() === "number" && cs.val() === o.id) up["meta/orderCounter"] = o.id - 1;
     await update(ref(db), up);
+    return newStock; // stock final real en Firebase (valor absoluto)
   },
   // Comprobante de pago (foto de la boleta o de la transferencia)
   saveVoucher: async (orderKey, url, customerUid) => {
@@ -5183,6 +5185,16 @@ function _refreshOrderViews(){
   try{ if(typeof renderShop==="function") renderShop(); }catch(e){}
 }
 
+// Ajusta el stock local con el valor REAL que quedó en Firebase (nunca suma de nuevo:
+// cancelOrder ya devolvió el stock en la base de datos y el listener en vivo ya lo trajo)
+function _applyRestoredStock(items,ns){
+  if(!ns) return;
+  items.forEach(function(it){
+    const p=products.find(function(x){return x.id===it.id;});
+    if(p&&it.pkey&&typeof ns[it.pkey]==="number") p.stock=ns[it.pkey];
+  });
+}
+
 // ── Cancelar pedido (cliente) ──
 async function cancelMyOrder(id,ev){
   if(ev&&ev.stopPropagation) ev.stopPropagation();
@@ -5191,13 +5203,14 @@ async function cancelMyOrder(id,ev){
   if(!mo||!mo.key){ toast("No encontramos este pedido en tu dispositivo. Contacta a la tienda.","error"); return; }
   if(!confirm("¿Cancelar tu pedido #"+id+"?\nLos productos volverán al inventario.")) return;
   const items=(mo.items||[]).map(function(i){ const p=products.find(function(x){return x.id===i.id;}); return {id:i.id,qty:i.qty,pkey:(p&&p._key)||null}; });
+  let _ns=null;
   try{
-    await window._fb.cancelOrder({id:Number(id),_key:mo.key,customerUid:mo.customerUid||"",items:items,restore:true});
+    _ns=await window._fb.cancelOrder({id:Number(id),_key:mo.key,customerUid:mo.customerUid||"",items:items,restore:true});
   }catch(e){
     console.warn("cancelOrder:",e);
     toast("No se pudo cancelar. Si el pedido ya está en proceso, comunícate con la tienda.","error"); return;
   }
-  items.forEach(function(it){ const p=products.find(function(x){return x.id===it.id;}); if(p) p.stock=(parseInt(p.stock,10)||0)+(parseInt(it.qty,10)||0); });
+  _applyRestoredStock(items,_ns);
   try{ localStorage.setItem("lx_products",JSON.stringify(products)); }catch(e){}
   forgetMyOrder(id);
   try{ orders=orders.filter(function(o){return o.id!==Number(id);}); localStorage.setItem("lx_orders",JSON.stringify(orders)); }catch(e){}
@@ -5331,11 +5344,12 @@ async function adminDeleteOrder(id){
   let restore=true;
   if(o.status==="Entregado") restore=confirm("Este pedido ya fue ENTREGADO.\n¿Devolver igual los productos al inventario?\n(Aceptar = devolver · Cancelar = no devolver)");
   const items=(o.items||[]).map(function(i){ const p=products.find(function(x){return x.id===i.id;}); return {id:i.id,qty:i.qty,pkey:(p&&p._key)||null}; });
+  let _ns=null;
   try{
-    await window._fb.cancelOrder({id:o.id,_key:o._key,customerUid:o.customerUid||"",items:items,restore:restore});
+    _ns=await window._fb.cancelOrder({id:o.id,_key:o._key,customerUid:o.customerUid||"",items:items,restore:restore});
   }catch(e){ console.warn("deleteOrder:",e); toast("No se pudo eliminar el pedido","error"); return; }
   if(restore){
-    items.forEach(function(it){ const p=products.find(function(x){return x.id===it.id;}); if(p) p.stock=(parseInt(p.stock,10)||0)+(parseInt(it.qty,10)||0); });
+    _applyRestoredStock(items,_ns);
     try{ localStorage.setItem("lx_products",JSON.stringify(products)); }catch(e){}
   }
   orders=orders.filter(function(x){return x.id!==id;});
