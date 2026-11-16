@@ -832,6 +832,9 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
 .status-badge { display: inline-block; padding: 0.4rem 0.8rem; border-radius: 100px; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.5px; text-align: center; }
 .status-badge.pendiente, .status-badge.Pendiente { background: var(--orange-soft); color: #92400e; }
 .status-badge.enproceso, .status-badge.EnProceso { background: #e0e7ff; color: #3730a3; }
+.status-badge.empacado, .status-badge.Empacado { background: #cffafe; color: #155e75; }
+.status-badge.entregadoapaquetería, .status-badge.EntregadoaPaquetería { background: #fce7f3; color: #9d174d; }
+.status-badge.entregadoarepartidor, .status-badge.EntregadoaRepartidor { background: #ecfccb; color: #3f6212; }
 .status-badge.enruta, .status-badge.EnRuta { background: #f3e8ff; color: #6b21a8; }
 .status-badge.entregado, .status-badge.Entregado { background: var(--green-soft); color: var(--green-soft-text); }
 .status-badge.cancelado, .status-badge.Cancelado { background: var(--red-soft); color: #991b1b; }
@@ -1319,6 +1322,9 @@ h1, h2, h3, h4, .section-title, .nav-logo { font-family: "Plus Jakarta Sans", sa
         <option value="">Todos los estados</option>
         <option value="Pendiente">Pendiente</option>
         <option value="En Proceso">En Proceso</option>
+        <option value="Empacado">Empacado</option>
+        <option value="Entregado a Paquetería">Entregado a Paquetería</option>
+        <option value="Entregado a Repartidor">Entregado a Repartidor</option>
         <option value="En Ruta">En Ruta</option>
         <option value="Entregado">Entregado</option>
         <option value="Cancelado">Cancelado</option>
@@ -2856,7 +2862,7 @@ function goTrackOrder(){
   showPage("track"); doTrack();
 }
 
-const STEPS=["Pendiente","En Proceso","En Ruta","Entregado","Cancelado"];
+const STEPS=["Pendiente","En Proceso","Empacado","Entregado a Paquetería","Entregado a Repartidor","En Ruta","Entregado","Cancelado"];
 async function doTrack(){
   const q=document.getElementById("trackInput").value.trim().toLowerCase();
   const res=document.getElementById("trackResult");
@@ -2874,7 +2880,7 @@ async function doTrack(){
   if(!found.length){res.innerHTML="<div class='track-result' style='text-align:center;color:var(--text-muted);font-weight:500;'>No se encontraron pedidos con esos datos.</div>";return;}
   res.innerHTML=found.map(o=>{
     const isCancelled=o.status==="Cancelado";
-    const activeSteps=["Pendiente","En Proceso","En Ruta","Entregado"];
+    const activeSteps=["Pendiente","En Proceso","Empacado",o.status==="Entregado a Repartidor"?"Entregado a Repartidor":"Entregado a Paquetería","En Ruta","Entregado"];
     const si=activeSteps.indexOf(o.status);
     const stepsHtml=isCancelled
       ? "<div style='background:var(--red-soft);color:#991b1b;border-radius:var(--radius-md);padding:1rem 1.2rem;text-align:center;font-weight:700;font-size:1rem;margin:1.2rem 0'>❌ Pedido Cancelado</div>"
@@ -2973,7 +2979,7 @@ function renderAdminDashboard(){
     "<div class='stat-card'><div class='stat-num'>"+pend+"</div><div class='stat-label'>Pendientes</div></div>"+
     "<div class='stat-card'><div class='stat-num'>Q"+total.toFixed(0)+"</div><div class='stat-label'>Ventas</div></div>";
   document.getElementById("recentOrdersTbody").innerHTML=[...orders].reverse().slice(0,10).map(o=>
-    "<tr><td>#"+o.id+"</td><td>"+new Date(o.date).toLocaleDateString("es-GT")+"</td><td>"+o.customer.name+"</td><td><strong>Q"+o.total.toFixed(2)+"</strong></td><td><span class='status-badge "+o.status.replace(" ","")+"'>"+o.status+"</span></td></tr>"
+    "<tr><td>#"+o.id+"</td><td>"+new Date(o.date).toLocaleDateString("es-GT")+"</td><td>"+o.customer.name+"</td><td><strong>Q"+o.total.toFixed(2)+"</strong></td><td><span class='status-badge "+o.status.replace(/ /g,"")+"'>"+o.status+"</span></td></tr>"
   ).join("");
 }
 
@@ -3334,7 +3340,7 @@ function filterAdminOrders(){renderAdminOrders();}
 function renderAdminOrders(){
   const q=(document.getElementById("ordersSearch")?.value||"").toLowerCase();
   const stf=document.getElementById("orderStatusFilter")?.value||"";
-  const stats={"Pendiente":0,"En Proceso":0,"En Ruta":0,"Entregado":0,"Cancelado":0};
+  const stats={"Pendiente":0,"En Proceso":0,"Empacado":0,"Entregado a Paquetería":0,"Entregado a Repartidor":0,"En Ruta":0,"Entregado":0,"Cancelado":0};
   orders.forEach(o=>{if(stats[o.status]!==undefined)stats[o.status]++;});
   document.getElementById("ordersStats").innerHTML=Object.entries(stats).map(([k,v])=>
     "<div class='stat-card'><div class='stat-num'>"+v+"</div><div class='stat-label'>"+k+"</div></div>"
@@ -4937,7 +4943,7 @@ async function loadClientOrders() {
   }
   const sorted = [...clientOrders].sort((a,b) => b.date - a.date);
   sorted.forEach(o => { if (o._key) rememberMyOrder(o, o._key); });
-  const statusColor = { "Pendiente":"var(--orange)","En Proceso":"var(--accent)","En Ruta":"#3b82f6","Entregado":"var(--green)","Cancelado":"var(--red)" };
+  const statusColor = { "Pendiente":"var(--orange)","En Proceso":"var(--accent)","Empacado":"#0891b2","Entregado a Paquetería":"#db2777","Entregado a Repartidor":"#65a30d","En Ruta":"#3b82f6","Entregado":"var(--green)","Cancelado":"var(--red)" };
   container.innerHTML = sorted.map(o => {
     const date = new Date(o.date).toLocaleDateString("es-GT",{year:"numeric",month:"short",day:"numeric"});
     const itemsText = (o.items||[]).slice(0,2).map(i => i.name + " x" + i.qty).join(", ") + ((o.items||[]).length > 2 ? ` y ${o.items.length-2} más` : "");
